@@ -1,0 +1,168 @@
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Cheap gate: type-checks every source file against the stub PSL1GHT
+  # headers. No PS3 toolchain needed, runs in seconds, always first.
+  # ---------------------------------------------------------------------
+  hostcheck:
+    name: host compile check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc cpp
+
+      - name: Type-check against the stub headers
+        run: sh tools/check/check.sh
+
+      # Advisory only. These flags are not exercised locally, so they must
+      # never be allowed to fail the pipeline that produces the .pkg.
+      - name: Advisory extra warnings
+        continue-on-error: true
+        run: |
+          mkdir -p build/strict
+          for f in source/*.c tools/check/host_stubs.c; do
+            echo "--- $f"
+            gcc -c -std=c99 -Wall -Wextra -Wshadow -Wcast-align \
+                -Wstrict-prototypes -Wmissing-prototypes -Wpointer-arith \
+                -Wno-unused-parameter -Wno-sign-compare \
+                -I tools/check/stubs -I include \
+                -o build/strict/ -x c "$f" || true
+          done
+
+  # ---------------------------------------------------------------------
+  # Real PowerPC build in a container that already ships ps3toolchain,
+  # PSL1GHT and SDL 1.3. hldtux/ps3dev builds ps3dev/ps3libraries, whose
+  # scripts/013-sdl_psl1ght.sh installs libSDL into $PS3DEV/portlibs/ppu.
+  #
+  # Artifact locations come from PSL1GHT's ppu_rules:
+  #   build/DVDREGION.elf      stripped ELF
+  #   DVDREGION.self            the NPDRM self   (repo root, not build/)
+  #   DVDREGION.gnpdrm.pkg      the pkg          (repo root)
+  #   build/pkg/{PARAM.SFO,USRDIR/EBOOT.BIN,ICON0.PNG}
+  # ---------------------------------------------------------------------
+  ps3:
+    name: PS3 self + pkg
+    needs: hostcheck
+    runs-on: ubuntu-latest
+    container:
+      image: hldtux/ps3dev:latest
+    steps:
+      # The workspace is bind-mounted and owned by another uid than root, so
+      # git refuses to touch it until it is marked safe.
+      - name: Mark the workspace as a safe git directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: actions/checkout@v4
+
+      - name: Report the toolchain
+        run: |
+          echo "PS3DEV=$PS3DEV"
+          echo "PSL1GHT=$PSL1GHT"
+          ppu-gcc --version | head -1
+          echo "ppu_rules  : $(ls "$PSL1GHT"/ppu_rules 2>/dev/null || echo MISSING)"
+          echo "base_rules : $(ls "$PSL1GHT"/base_rules 2>/dev/null || echo MISSING)"
+          echo "libSDL.a   : $(ls "$PS3DEV"/portlibs/ppu/lib/libSDL.a 2>/dev/null || echo MISSING)"
+          echo "SDL.h      : $(ls "$PS3DEV"/portlibs/ppu/include/SDL/SDL.h 2>/dev/null || echo MISSING)"
+
+      - name: Fail early with a clear message if SDL 1.3 is absent
+        run: |
+          if [ ! -f "$PS3DEV/portlibs/ppu/lib/libSDL.a" ]; then
+            echo "::error::SDL 1.3 (libSDL.a) is not installed in this image."
+            echo "::error::source/gfx.c targets the SDL 1.3 API (SDL_SetVideoMode,"
+            echo "::error::SDL_SWSURFACE), which SDL 2 removed. Use the"
+            echo "::error::hldtux/ps3dev-sdl2 image, or install"
+            echo "::error::https://github.com/zeldin/SDL_PSL1GHT into"
+            echo "::error::\$PS3DEV/portlibs/ppu before building."
+            exit 1
+          fi
+
+      - name: Build the NPDRM self
+        run: |
+          set -e
+          make clean || true
+          make
+          ls -l DVDREGION.self
+          file build/DVDREGION.elf || true
+
+      - name: Build the pkg
+        # PSL1GHT's sfo/pkg helpers are C programs in current releases, so no
+        # Python 2 is involved. Non-fatal on purpose: the self alone is
+        # loadable and is the artifact that matters most.
+        continue-on-error: true
+        run: |
+          set -e
+          make pkg
+          ls -l ./*.pkg
+
+      - name: Stage the artifacts
+        run: |
+          set -e
+          mkdir -p artifacts/DVDREGION
+
+          cp -v build/DVDREGION.elf artifacts/DVDREGION/ 2>/dev/null || true
+          cp -v DVDREGION.self       artifacts/DVDREGION/ 2>/dev/null || true
+          cp -v ./*.pkg              artifacts/DVDREGION/ 2>/dev/null || true
+
+          # Ready-to-install folder: copy to /dev_hdd0/game/DVDRGN01000/ on the
+          # console and it appears in the XMB.
+          if [ -f build/pkg/USRDIR/EBOOT.BIN ]; then
+            mkdir -p artifacts/DVDRGN01000
+            cp -v build/pkg/USRDIR/EBOOT.BIN artifacts/DVDRGN01000/
+            cp -v build/pkg/PARAM.SFO       artifacts/DVDRGN01000/
+            [ -f build/pkg/ICON0.PNG ] && cp -v build/pkg/ICON0.PNG artifacts/DVDRGN01000/
+          fi
+
+          echo
+          echo "=== artifacts ==="
+          find artifacts -type f -printf '%10s  %p\n' | sort -k2
+
+      - name: Write install instructions
+        if: always()
+        run: |
+          {
+            echo "## DVD Region Tools - build output"
+            echo
+            echo '```'
+            echo "ELF  : $(file -b build/DVDREGION.elf 2>/dev/null | cut -c1-60)"
+            echo "self : $(ls -l DVDREGION.self 2>/dev/null | awk '{print $5" bytes"}' || echo none)"
+            echo "pkg  : $(ls -l ./*.pkg 2>/dev/null | awk '{print $9" ("$5" bytes)"}' | tr '\n' ' ')"
+            echo '```'
+            echo
+            echo "### Installing"
+            echo
+            echo "**A - NPDRM pkg (CFW/HEN).** Install \`DVDREGION.gnpdrm.pkg\` from the"
+            echo "artifact. It holds an NPDRM self, so it is *not* signed with a"
+            echo "console ID; a debug or dummy PSN account is enough."
+            echo
+            echo "**B - sideload the folder (any CFW/HEN/HAN).** Copy the"
+            echo "\`DVDRGN01000\` folder to \`/dev_hdd0/game/DVDRGN01000/\` and launch it"
+            echo "from the XMB."
+            echo
+            echo "A registry change needs a restart to take effect; the app has a"
+            echo "*Restart the console* entry on its Backup page for that."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: DVDREGION
+          path: artifacts/
+          if-no-files-found: error
