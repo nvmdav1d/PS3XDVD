@@ -36,8 +36,20 @@ CFLAGS    += -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare \
 
 CXXFLAGS  += $(CFLAGS)
 
-LDFLAGS   += -L$(PORTLIBS)/lib
-LIBS      += -lSDL -lpad -lm
+# base_rules links with "$(LD) $^ $(LDFLAGS) $(LIBPATHS) $(LIBS)", and nothing in
+# PSL1GHT assigns LIBPATHS, so the search paths have to be given here or every
+# PSL1GHT library (-lpad and friends) is reported as missing.
+LIBPATHS  := -L$(PSL1GHT)/ppu/lib \
+             -L$(PSL1GHT)/ppu/powerpc64-ps3-elf/lib \
+             -L$(PORTLIBS)/lib
+
+LDFLAGS   += $(LIBPATHS)
+
+# SDL 1.3 is a static library that pulls in the whole RSX/video/audio stack, so
+# its undefined symbols must be resolved after it. This mirrors the link line
+# that ships with the hldtux/ps3dev container image.
+LIBS      := -lSDL -lpad -lsysutil -lrsx -lgcm_sys -lio -laudio \
+             -lrt -llv2 -lm
 
 all:      $(TARGET).self
 pkg:      $(TARGET).pkg
