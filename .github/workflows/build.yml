@@ -81,22 +81,42 @@ jobs:
           echo "base_rules : $(ls "$PSL1GHT"/base_rules 2>/dev/null || echo MISSING)"
           echo "libSDL.a   : $(ls "$PS3DEV"/portlibs/ppu/lib/libSDL.a 2>/dev/null || echo MISSING)"
           echo "SDL.h      : $(ls "$PS3DEV"/portlibs/ppu/include/SDL/SDL.h 2>/dev/null || echo MISSING)"
-          echo "libpad.a   : $(ls "$PSL1GHT"/ppu/lib/libpad.a 2>/dev/null || echo MISSING)"
+
+      # Purely diagnostic: answers why the link line behaves the way it does.
+      - name: Diagnose the link toolchain
+        continue-on-error: true
+        run: |
+          echo "### which linker does make actually pick?"
+          make -n 2>/dev/null | grep -E 'powerpc|ppu-| -o |gcc' | tail -5 || true
           echo
-          echo "--- what is libSDL.a actually? ---"
-          SDL_A="$PS3DEV/portlibs/ppu/lib/libSDL.a"
-          if [ -f "$SDL_A" ]; then
-            ls -l "$SDL_A"
-            ppu-ar t "$SDL_A" 2>&1 | head -3 || echo "ppu-ar t failed"
-            # a real PPC object inside proves the archive is usable
-            ppu-ar p "$SDL_A" /tmp/_sdl_probe.o 2>/dev/null && \
-              file /tmp/_sdl_probe.o && rm -f /tmp/_sdl_probe.o
-          fi
+          echo "### make's view of the variables"
+          make -p 2>/dev/null | grep -E '^(CC|LD|PREFIX|LIBPATHS|LIBS|LDFLAGS|CFLAGS) ' | head -20 || true
           echo
-          echo "--- link-line inputs ---"
-          for l in libpad.a libsysutil.a librsx.a libgcm_sys.a libio.a libaudio.a librt.a liblv2.a; do
-            printf '  %-16s %s\n' "$l" "$(find "$PSL1GHT/ppu" -name "$l" 2>/dev/null | head -1 || true)"
+          echo "### the ppu tools themselves"
+          for t in ppu-gcc ppu-ld ppu-ar ppu-strip sprxlinker make_self make_self_npdrm sfo pkg; do
+            p=$(command -v "$t" 2>/dev/null || true)
+            printf '  %-18s %s\n' "$t" "${p:-NOT ON PATH}"
+            [ -n "$p" ] && file -b "$p" 2>/dev/null | sed 's/^/      /'
           done
+          echo
+          echo "### is LD exported into the environment?"
+          echo "  shell LD  = '${LD:-<unset>}'"
+          echo
+          echo "### what is inside the archives?"
+          for a in "$PS3DEV/portlibs/ppu/lib/libSDL.a" \
+                   "$PSL1GHT/ppu/lib/libsysutil.a" \
+                   "$PS3DEV/ppu/powerpc64-ps3-elf/lib/libm.a"; do
+            [ -f "$a" ] || { echo "  $a  MISSING"; continue; }
+            printf '  %s\n' "$a"
+            d=$(mktemp -d)
+            ( cd "$d" && ppu-ar x "$a" 2>/dev/null && \
+              f=$(ls | head -1) && file -b "$f" 2>/dev/null | sed 's/^/      /' )
+            rm -rf "$d"
+          done
+          echo
+          echo "### where is libpad?"
+          find "$PS3DEV" -name 'libpad*' 2>/dev/null | head -5 | sed 's/^/  /' || true
+          echo "  (end)"
 
       - name: Fail early with a clear message if SDL 1.3 is absent
         run: |
