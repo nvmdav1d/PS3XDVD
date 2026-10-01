@@ -355,10 +355,12 @@ static int enumerate(const char *dir, copy_entry **out, uint32_t *out_count,
 		memset(&ent, 0, sizeof(ent));
 		if (sysFsReaddir(fd, &ent, &read) != 0 || read == 0)
 			break;
-		if (ent.d_namlen == 0 || ent.d_namlen > sizeof(nm) - 1)
+		if (ent.d_namlen == 0)
 			continue;
 
 		l = ent.d_namlen;
+		if (l > sizeof(nm) - 1)
+			l = sizeof(nm) - 1;
 		memcpy(nm, ent.d_name, l);
 		nm[l] = '\0';
 		if (nm[0] == '.' && (nm[1] == '\0' || (nm[1] == '.' && nm[2] == '\0')))
@@ -445,7 +447,7 @@ int rip_copy_video_ts(const char *out_dir, int patch_region,
 			{
 				sysFsClose(sfd);
 				snprintf(st->message, sizeof(st->message),
-				         "Cannot create %s", list[i].clean);
+				         "Cannot create %.100s", list[i].clean);
 				st->failed = 1;
 				st->finished = 1;
 				free(list);
@@ -479,7 +481,7 @@ int rip_copy_video_ts(const char *out_dir, int patch_region,
 
 		if (failed)
 		{
-			snprintf(st->message, sizeof(st->message), "Error copying %s",
+			snprintf(st->message, sizeof(st->message), "Error copying %.100s",
 			         list[i].clean);
 			st->failed = 1;
 			st->finished = 1;

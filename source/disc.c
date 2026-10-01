@@ -326,10 +326,14 @@ int disc_video_ts_size(uint64_t *out_bytes)
 		memset(&ent, 0, sizeof(ent));
 		if (sysFsReaddir(fd, &ent, &read) != 0 || read == 0)
 			break;
-		if (ent.d_namlen == 0 || ent.d_namlen > sizeof(nm) - 1)
+		/* d_namlen is a u8 on GameOS, so it can never exceed nm; the clamp
+		 * only matters if a future header widens the field. */
+		if (ent.d_namlen == 0)
 			continue;
 
 		l = ent.d_namlen;
+		if (l > sizeof(nm) - 1)
+			l = sizeof(nm) - 1;
 		memcpy(nm, ent.d_name, l);
 		nm[l] = '\0';
 		if (nm[0] == '.')

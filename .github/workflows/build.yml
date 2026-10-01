@@ -44,7 +44,7 @@ jobs:
                 -Wstrict-prototypes -Wmissing-prototypes -Wpointer-arith \
                 -Wno-unused-parameter -Wno-sign-compare \
                 -I tools/check/stubs -I include \
-                -o build/strict/ -x c "$f" || true
+                -o "build/strict/$(basename "${f%.c}").o" "$f" || true
           done
 
   # ---------------------------------------------------------------------

@@ -6,9 +6,15 @@
 #include "storage.h"
 #include "util.h"
 
+/* A note on the pointer arguments: they are cast straight to u64 rather than
+ * through uint32_t. The old (u64)(uint32_t)ptr idiom truncates before it
+ * widens, which is only safe because PS3 user addresses happen to fit in 32
+ * bits. ppu-gcc targets 64 bit, so widening directly is both correct and what
+ * PSL1GHT's own sys/file.h does. */
+
 int storage_open(uint64_t device_id, uint32_t *handle)
 {
-	lv2syscall4(STORAGE_OPEN, device_id, 0, (u64)(uint32_t)handle, 0);
+	lv2syscall4(STORAGE_OPEN, device_id, 0, (u64)handle, 0);
 	return (int)p1;
 }
 
@@ -22,14 +28,14 @@ int storage_read(uint32_t handle, uint64_t lba, uint32_t sectors, void *buf,
                  uint32_t *sectors_read)
 {
 	lv2syscall7(STORAGE_READ, (u64)handle, 0, lba, (u64)sectors,
-	            (u64)(uint32_t)buf, (u64)(uint32_t)sectors_read, 0);
+	            (u64)buf, (u64)sectors_read, 0);
 	return (int)p1;
 }
 
 int storage_get_info(uint64_t device_id, storage_device_info *info)
 {
 	lv2syscall3(STORAGE_GET_DEVICE_INFO, device_id,
-	            (u64)(uint32_t)info, (u64)sizeof(*info));
+	            (u64)info, (u64)sizeof(*info));
 	return (int)p1;
 }
 
@@ -55,8 +61,8 @@ int storage_atapi(uint32_t handle, const uint8_t *cmd, uint32_t cmd_len,
 	 * reply. */
 	lv2syscall7(STORAGE_EXECUTE_DEVICE_COMMAND, (u64)handle,
 	            LV2_STORAGE_SEND_ATAPI_COMMAND,
-	            (u64)(uint32_t)&blk, (u64)sizeof(blk),
-	            (u64)(uint32_t)buf, (u64)buf_len, (u64)(uint32_t)&tag);
+	            (u64)&blk, (u64)sizeof(blk),
+	            (u64)buf, (u64)buf_len, (u64)&tag);
 	ret = (int)p1;
 
 	if (ret != 0)
@@ -71,8 +77,8 @@ int storage_atapi(uint32_t handle, const uint8_t *cmd, uint32_t cmd_len,
 
 		lv2syscall7(STORAGE_SEND_DEVICE_COMMAND, (u64)handle,
 		            LV2_STORAGE_SEND_ATAPI_COMMAND,
-		            (u64)(uint32_t)&blk, (u64)sizeof(blk),
-		            (u64)(uint32_t)buf, (u64)buf_len, (u64)(uint32_t)&tag);
+		            (u64)&blk, (u64)sizeof(blk),
+		            (u64)buf, (u64)buf_len, (u64)&tag);
 		ret = (int)p1;
 	}
 
