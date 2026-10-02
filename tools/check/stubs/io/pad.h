@@ -20,6 +20,22 @@ extern "C" {
 #define PAD_ERROR_FATAL         0x80121101
 #define PAD_ERROR_INVALID_PARAMETER 0x80121102
 
+/* Press-mode / sensor-mode selectors, mirrored from the real header. */
+#define PAD_PRESS_MODE_ON       1
+#define PAD_PRESS_MODE_OFF      0
+#define PAD_INFO_SUPPORTED_PRESS_MODE 1
+#define PAD_SENSOR_MODE_ON      1
+#define PAD_SENSOR_MODE_OFF     0
+#define PAD_INFO_SUPPORTED_SENSOR_MODE 1
+#define PAD_SETTINGS_PRESS_ON   (1<<1)
+#define PAD_SETTINGS_PRESS_OFF  (0)
+#define PAD_SETTINGS_SENSOR_ON  (1<<2)
+#define PAD_SETTINGS_SENSOR_OFF (0)
+
+/* Status bits reported through padInfo::status[] */
+#define PAD_MCONT_DATA_ENTER    0x02
+#define PAD_MCONT_DATA_FMT      0x04
+
 typedef struct _pad_info
 {
 	u32 max;

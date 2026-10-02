@@ -27,6 +27,9 @@ int  input_pressed(uint32_t mask);
 /* 1 for as long as the button is down */
 int  input_held(uint32_t mask);
 
+/* The raw button mask from the most recent poll. */
+uint32_t input_mask(void);
+
 /* Auto-repeat helper for list navigation.
  * Fires immediately on press, then after `delay_ms`, then every `rate_ms`.
  * `state` must be a zero-initialised unsigned long owned by the caller. */
@@ -35,6 +38,14 @@ int  input_repeat(uint32_t mask, unsigned long *state, uint32_t delay_ms,
 
 /* Milliseconds since input_init(). */
 uint32_t input_millis(void);
+
+/* Diagnostics for the HOME screen, so a dead pad can be told apart from a
+ * dead UI without attaching a debugger. */
+extern int      g_ioPadInitRet;
+extern int      g_pads_connected;
+extern uint32_t g_pad_last_len;
+extern uint32_t g_pad_last_word;
+extern int      g_pad_ports_seen;
 
 /* Requests a console restart. If the console honours it this call never
  * returns; otherwise it returns immediately and the user has to restart by

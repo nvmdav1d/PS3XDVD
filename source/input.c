@@ -15,11 +15,38 @@ static uint32_t g_prev;
 static int      g_ready;
 static struct timeval g_t0;
 
+/* Diagnostics, surfaced on the HOME screen. */
+int      g_ioPadInitRet;
+int      g_pads_connected;
+uint32_t g_pad_last_len;      /* padData.len of the last non-empty report */
+uint32_t g_pad_last_word;     /* raw button word, offset 4 of the padData */
+int      g_pad_ports_seen;    /* bitmask of ports that reported data      */
+
 int input_init(void)
 {
 	memset(&g_cur, 0, sizeof(g_cur));
 	memset(&g_prev, 0, sizeof(g_prev));
-	g_ready = (ioPadInit(7) == PAD_OK) ? 1 : 0;
+
+	g_ioPadInitRet    = ioPadInit(MAX_PORT_NUM);
+	g_pads_connected  = 0;
+	g_pad_last_len    = 0;
+	g_pad_last_word   = 0;
+	g_pad_ports_seen  = 0;
+
+	g_ready = (g_ioPadInitRet == PAD_OK) ? 1 : 0;
+
+	/*
+	 * After ioPadInit the pad defaults to the 5 bit button format; the 7 bit
+	 * format the BTN_* bitfields describe has to be selected explicitly or the
+	 * high bits never arrive. Harmless where the port is empty.
+	 */
+	if (g_ready)
+	{
+		uint32_t port;
+		for (port = 0; port < MAX_PORT_NUM; port++)
+			ioPadSetPressMode(port, PAD_PRESS_MODE_ON);
+	}
+
 	gettimeofday(&g_t0, NULL);
 	return g_ready;
 }
@@ -79,15 +106,41 @@ static uint32_t build_mask(const padData *d)
 
 void input_poll(void)
 {
-	padData data;
+	uint32_t port;
 	uint32_t mask = 0;
+	int      seen = 0;
+	padInfo  info;
 
-	memset(&data, 0, sizeof(data));
-	if (g_ready)
-		ioPadGetData(0, &data);
+	if (!g_ready)
+		return;
 
-	if (data.len > 0)
-		mask = build_mask(&data);
+	/*
+	 * Poll every port rather than port 0 only: RPCS3 and several CFW payloads
+	 * report a single controller on whichever port the OS handed it, and a
+	 * keyboard-to-pad bridge is not guaranteed to land on port 0.
+	 */
+	for (port = 0; port < MAX_PORT_NUM; port++)
+	{
+		padData data;
+
+		memset(&data, 0, sizeof(data));
+		ioPadGetData(port, &data);
+
+		if (data.len <= 0)
+			continue;
+
+		seen |= 1 << port;
+		g_pad_last_len  = (uint32_t)data.len;
+		g_pad_last_word = ((const uint16_t *)(const void *)&data)[2];
+
+		mask |= build_mask(&data);
+	}
+
+	g_pad_ports_seen = seen;
+
+	memset(&info, 0, sizeof(info));
+	if (ioPadGetInfo(&info) == 0)
+		g_pads_connected = (int)info.connected;
 
 	g_prev = g_cur;
 	g_cur  = mask;
@@ -101,6 +154,11 @@ int input_pressed(uint32_t mask)
 int input_held(uint32_t mask)
 {
 	return (g_cur & mask) ? 1 : 0;
+}
+
+uint32_t input_mask(void)
+{
+	return g_cur;
 }
 
 /* Fires immediately on press, then after `delay_ms`, then every `rate_ms`.

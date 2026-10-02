@@ -342,7 +342,22 @@ static void draw_home(void)
 	{
 		gfx_text(x + 20, y,      COL_ERR, "xRegistry.sys is not readable", 2);
 		gfx_text(x + 20, y + 28, COL_DIM, "Run this app from CFW, HEN or HAN", 2);
-		gfx_text(x + 20, y + 56, COL_DIM, "TRIANGLE rescan once the disc is in", 2);
+	}
+
+	/* Pad diagnostics: on a real console this is noise, but it is the only way
+	 * to tell a dead pad from a dead UI when running under an emulator. */
+	{
+		char dbg[128];
+
+		snprintf(dbg, sizeof(dbg), "pad init 0x%08X  connected %d  ports 0x%02X",
+		         (uint32_t)g_ioPadInitRet, g_pads_connected, g_pad_ports_seen);
+		gfx_text(x + 20, y + 126,
+		         (g_ioPadInitRet == 0) ? COL_DIM : COL_ERR, dbg, 2);
+
+		snprintf(dbg, sizeof(dbg), "len %u  word 0x%04X  mask 0x%02X",
+		         g_pad_last_len, g_pad_last_word, input_mask());
+		gfx_text(x + 20, y + 148,
+		         g_pad_last_len ? COL_OK : COL_DIM, dbg, 2);
 	}
 
 	x = MARGIN + 640;
