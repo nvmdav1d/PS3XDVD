@@ -44,8 +44,11 @@ int disc_probe(disc_info *out);
  * This talks to the drive, so the caller must cache the answer. */
 int disc_sector_count(uint64_t *out_sectors, char *how, size_t how_size);
 
-/* Total bytes behind /dev_bdvd/VIDEO_TS, used for the free space check. */
-int disc_video_ts_size(uint64_t *out_bytes);
+/* Estimated bytes behind /dev_bdvd/VIDEO_TS, used for the free space check.
+ * `out_complete` is set to 1 when that figure is a real sum of file sizes and
+ * 0 when it had to fall back to the disc geometry, so the caller can label it
+ * as an estimate instead of a fact. */
+int disc_video_ts_size(uint64_t *out_bytes, int *out_complete);
 
 /* Reads the first `len` bytes of `name` from /dev_bdvd/VIDEO_TS, trying both
  * the plain ISO9660 name and the ";1" versioned form. */

@@ -87,6 +87,7 @@ static int         g_dest;
  * disc / mode change instead of once per frame. */
 static uint64_t    g_disc_bytes;        /* total bytes on the disc, 0 unknown */
 static uint64_t    g_ts_bytes;          /* total bytes in VIDEO_TS          */
+static int         g_ts_exact;          /* 1 = real file sizes, 0 = estimate */
 static char        g_size_how[48];
 static int         g_size_valid;
 static char        g_basename[160];
@@ -720,7 +721,11 @@ static void draw_disc(void)
 
 		format_size(need, a, sizeof(a));
 		format_size(have, b, sizeof(b));
-		snprintf(buf, sizeof(buf), "Need %s   Free %s%s", a, b,
+		snprintf(buf, sizeof(buf), "%s%s%s   Free %s%s",
+		         (g_dump_mode == 1 && !g_ts_exact) ? "About " : "Need ",
+		         a,
+		         (g_dump_mode == 1 && !g_ts_exact) ? " (from disc geometry)" : "",
+		         b,
 		         fs_is_fat(dev) ? "  (FAT32, will split at 4 GB)" : "");
 		gfx_text_box(x + 20, y + 40, 560, 20,
 		             (need > 0 && have < need) ? COL_ERR : COL_DIM, buf, 2, ALIGN_LEFT);
@@ -1056,8 +1061,11 @@ static void measure_disc(void)
 
 	disc_make_basename(&g_disc, g_basename, sizeof(g_basename));
 
-	if (disc_video_ts_size(&g_ts_bytes) != 0)
+	if (disc_video_ts_size(&g_ts_bytes, &g_ts_exact) != 0)
+	{
 		g_ts_bytes = 0;
+		g_ts_exact = 0;
+	}
 }
 
 static void refresh_disc(void)
@@ -1331,11 +1339,18 @@ static void start_rip(void)
 	else
 	{
 		uint64_t free_bytes = device_free(dev);
+		uint64_t need = g_ts_bytes;
 
-		if (g_ts_bytes > 0 && free_bytes < g_ts_bytes)
+		/* An estimate comes from the disc geometry, so give it headroom
+		 * rather than starting a multi gigabyte copy that runs out of room
+		 * near the end. */
+		if (need > 0 && !g_ts_exact)
+			need += need / 8 + (64ULL * 1024 * 1024);
+
+		if (need > 0 && free_bytes < need)
 		{
 			char a[32], b[32];
-			format_size(g_ts_bytes, a, sizeof(a));
+			format_size(need, a, sizeof(a));
 			format_size(free_bytes, b, sizeof(b));
 			show_dialog(DLG_ERROR, "Not enough space",
 			            "Need about %s, %s has %s free.", a, dev, b);

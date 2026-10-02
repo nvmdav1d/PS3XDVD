@@ -13,6 +13,7 @@
 
 void fakefs_reset(void);
 int  fakefs_put(const char *path, const void *data, size_t len);
+void fakefs_hide(const char *path);
 
 static int g_fail;
 
@@ -222,6 +223,97 @@ static void t_vmg_only(void)
 	CHECK(d.region_free == 1, "a lone zero byte claimed region free again");
 }
 
+/* The 48 KB bug: the bdvd bridge will not stat the large VOB files, so
+ * summing st_size only ever counted the few kilobytes of IFO and BUP files. */
+/* Note: VMG_PATH is /dev_bdvd/VIDEO_TS/VIDEO_TS.IFO, so the 256 byte VMG
+ * image is itself one of the members that gets counted. */
+
+static void t_size_all_stats_work(void)
+{
+	uint8_t vmg[256];
+	uint8_t blob[4096];
+	uint64_t bytes = 0;
+	int complete = 0;
+
+	printf("test: exact size when every member stats cleanly\n");
+
+	memset(blob, 0xA5, sizeof(blob));
+	build_ifo(vmg, "DVDVIDEO-VMG", 0xFD, 1, "FOX");
+
+	fakefs_reset();
+	fakefs_put(VMG_PATH, vmg, sizeof(vmg));
+	fakefs_put("/dev_bdvd/VIDEO_TS/VTS_01_0.IFO", blob, sizeof(blob));
+	fakefs_put("/dev_bdvd/VIDEO_TS/VTS_01_1.VOB", blob, sizeof(blob));
+
+	CHECK(disc_video_ts_size(&bytes, &complete) == 0, "size failed");
+	CHECK(complete == 1, "complete = %d, want 1", complete);
+	CHECK(bytes == sizeof(vmg) + 2 * sizeof(blob), "bytes = %llu, want %llu",
+	      (unsigned long long)bytes,
+	      (unsigned long long)(sizeof(vmg) + 2 * sizeof(blob)));
+}
+
+static void t_size_falls_back_when_stat_fails(void)
+{
+	uint8_t vmg[256];
+	uint8_t blob[4096];
+	uint64_t bytes = 0;
+	int complete = 1;
+
+	printf("test: falls back to disc geometry when a member will not stat\n");
+
+	memset(blob, 0xA5, sizeof(blob));
+
+	/* vmg_last_sector = 3000, so the video area is 3001 sectors */
+	build_ifo(vmg, "DVDVIDEO-VMG", 0xFD, 1, "FOX");
+	vmg[0x0C] = 0x00; vmg[0x0D] = 0x00; vmg[0x0E] = 0x0B; vmg[0x0F] = 0xB8;
+
+	fakefs_reset();
+	fakefs_put(VMG_PATH, vmg, sizeof(vmg));
+	fakefs_put("/dev_bdvd/VIDEO_TS/VTS_01_0.IFO", blob, sizeof(blob));
+
+	/* This is the big one, and the bridge refuses to stat it. */
+	fakefs_put("/dev_bdvd/VIDEO_TS/VTS_01_1.VOB", blob, sizeof(blob));
+	fakefs_hide("/dev_bdvd/VIDEO_TS/VTS_01_1.VOB");
+
+	CHECK(disc_video_ts_size(&bytes, &complete) == 0, "size failed");
+	CHECK(complete == 0, "complete = %d, want 0 for a fallback", complete);
+
+	/* Must not report the few KB it managed to stat, which is the bug that
+	 * made a 6 GB disc look like 48 KB. */
+	CHECK(bytes == 3001ULL * 2048ULL,
+	      "bytes = %llu, want the geometry estimate %llu",
+	      (unsigned long long)bytes, (unsigned long long)(3001ULL * 2048ULL));
+	CHECK(bytes > 8192,
+	      "the fallback still under-reports the disc size (%llu bytes)",
+	      (unsigned long long)bytes);
+}
+
+static void t_size_versioned_names(void)
+{
+	uint8_t vmg[256];
+	uint8_t blob[2048];
+	uint64_t bytes = 0;
+	int complete = 0;
+
+	printf("test: members spelled with the ISO9660 version suffix\n");
+
+	memset(blob, 0x5A, sizeof(blob));
+	build_ifo(vmg, "DVDVIDEO-VMG", 0xFD, 1, "FOX");
+
+	fakefs_reset();
+	fakefs_put(VMG_PATH, vmg, sizeof(vmg));
+	/* Listing says ";1", the only spelling that stats is without it. */
+	fakefs_put("/dev_bdvd/VIDEO_TS/VTS_02_0.IFO", blob, sizeof(blob));
+	fakefs_put("/dev_bdvd/VIDEO_TS/VTS_02_0.IFO;1", blob, sizeof(blob));
+
+	CHECK(disc_video_ts_size(&bytes, &complete) == 0, "size failed");
+	CHECK(complete == 1, "complete = %d, want 1", complete);
+	CHECK(bytes == sizeof(vmg) + 2 * sizeof(blob),
+	      "bytes = %llu, want both spellings counted (%llu)",
+	      (unsigned long long)bytes,
+	      (unsigned long long)(sizeof(vmg) + 2 * sizeof(blob)));
+}
+
 int main(void)
 {
 	printf("disc region unit tests\n");
@@ -235,6 +327,9 @@ int main(void)
 	t_multi_region();
 	t_rce();
 	t_vmg_only();
+	t_size_all_stats_work();
+	t_size_falls_back_when_stat_fails();
+	t_size_versioned_names();
 
 	printf("======================\n");
 	if (g_fail == 0)

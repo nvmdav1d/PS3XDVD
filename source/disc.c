@@ -370,16 +370,64 @@ int disc_sector_count(uint64_t *out_sectors, char *how, size_t how_size)
 
 /* -------------------------------------------------------------- folder size */
 
-int disc_video_ts_size(uint64_t *out_bytes)
+/* The bdvd bridge does not always accept a member name spelled the way the
+ * directory listing spells it, so every lookup retries the ISO9660 version
+ * suffix. Getting this wrong is what made a 6 GB disc report as 48 KB. */
+static int stat_ts_member(const char *nm, uint64_t *size)
+{
+	char path[512];
+	sysFSStat st;
+	size_t len = strlen(nm);
+	int has_ver = (len > 2 && strcmp(nm + len - 2, ";1") == 0);
+
+	ustrlcpy(path, "/dev_bdvd/VIDEO_TS/", sizeof(path));
+	ustrlcat(path, nm, sizeof(path));
+	if (sysFsStat(path, &st) == 0 && st.st_size > 0)
+	{
+		*size = st.st_size;
+		return 0;
+	}
+
+	if (!has_ver)
+	{
+		ustrlcat(path, ";1", sizeof(path));
+		if (sysFsStat(path, &st) == 0 && st.st_size > 0)
+		{
+			*size = st.st_size;
+			return 0;
+		}
+		return -1;
+	}
+
+	path[strlen(path) - 2] = '\0';
+	if (sysFsStat(path, &st) == 0 && st.st_size > 0)
+	{
+		*size = st.st_size;
+		return 0;
+	}
+	return -1;
+}
+
+/* Best estimate of how many bytes the copy needs.
+ *
+ * Per file sizes are summed when the bridge will tell us, which is the
+ * accurate answer. When it will not, the VMG's own last-LBN field is used
+ * instead: it is the disc telling us where the video area ends, and it does not
+ * depend on the filesystem bridge behaving. `out_complete` reports which of the
+ * two the caller got, so the UI can stop presenting a guess as a fact. */
+int disc_video_ts_size(uint64_t *out_bytes, int *out_complete)
 {
 	s32 fd = -1;
 	uint64_t read = 0;
 	uint64_t total = 0;
-	char path[512];
+	uint32_t files = 0;
+	uint32_t unsized = 0;
 
 	if (out_bytes == NULL)
 		return -1;
 	*out_bytes = 0;
+	if (out_complete != NULL)
+		*out_complete = 0;
 
 	if (sysFsOpendir("/dev_bdvd/VIDEO_TS", &fd) != 0)
 		return -1;
@@ -387,7 +435,7 @@ int disc_video_ts_size(uint64_t *out_bytes)
 	for (;;)
 	{
 		sysFSDirent ent;
-		sysFSStat st;
+		uint64_t    size = 0;
 		char nm[257];
 		size_t l;
 
@@ -407,13 +455,51 @@ int disc_video_ts_size(uint64_t *out_bytes)
 		if (nm[0] == '.')
 			continue;
 
-		ustrlcpy(path, "/dev_bdvd/VIDEO_TS/", sizeof(path));
-		ustrlcat(path, nm, sizeof(path));
-		if (sysFsStat(path, &st) == 0)
-			total += st.st_size;
+		files++;
+		if (stat_ts_member(nm, &size) == 0)
+			total += size;
+		else
+			unsized++;
 	}
 
 	sysFsClosedir(fd);
+
+	if (files == 0)
+		return -1;
+
+	if (unsized == 0)
+	{
+		*out_bytes = total;
+		if (out_complete != NULL)
+			*out_complete = 1;
+		return 0;
+	}
+
+	/* Fall back to the disc's own geometry. The video area ends at the VMG's
+	 * last LBN, so that many sectors is what the copy needs. */
+	{
+		uint8_t ifo[256];
+		uint32_t last;
+
+		memset(ifo, 0, sizeof(ifo));
+		if (read_video_ts_ifo(ifo, sizeof(ifo)) == 0 &&
+		    memcmp(ifo, "DVDVIDEO-VMG", 12) == 0)
+		{
+			last = be32(ifo + 0x0C);
+			if (last > 16 && last < DVD_MAX_SECTORS)
+			{
+				*out_bytes = (uint64_t)(last + 1) * 2048ULL;
+				if (out_complete != NULL)
+					*out_complete = 0;
+				return 0;
+			}
+		}
+	}
+
+	/* No geometry either: report what is known and let the copy discover the
+	 * rest. Under stating here only risks a late free space failure. */
 	*out_bytes = total;
+	if (out_complete != NULL)
+		*out_complete = 0;
 	return 0;
 }

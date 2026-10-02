@@ -363,6 +363,7 @@ typedef struct
 	char     name[256];      /* name as reported by the directory listing */
 	char     clean[256];     /* name without the ISO9660 version suffix  */
 	uint64_t size;
+	int      sized;          /* 0 when st_size was unusable, copy until EOF */
 } copy_entry;
 
 static void strip_version(char *dst, const char *src, size_t n)
@@ -372,23 +373,98 @@ static void strip_version(char *dst, const char *src, size_t n)
 		dst[len - 2] = '\0';
 }
 
+/* Builds the path of a member, retrying with the ISO9660 version suffix. The
+ * bdvd bridge does not always stat or open a name the way the directory listing
+ * spells it, and getting this wrong means silently copying an incomplete disc.
+ */
+static int open_video_ts_member(const char *nm, s32 *fd)
+{
+	char path[600];
+	int  ret;
+
+	ustrlcpy(path, "/dev_bdvd/VIDEO_TS/", sizeof(path));
+	ustrlcat(path, nm, sizeof(path));
+	ret = sysFsOpen(path, SYS_O_RDONLY, fd, NULL, 0);
+	if (ret == 0 && *fd >= 0)
+		return 0;
+
+	if (strlen(nm) > 2 && strcmp(nm + strlen(nm) - 2, ";1") == 0)
+	{
+		ustrlcpy(path, "/dev_bdvd/VIDEO_TS/", sizeof(path));
+		ustrlcat(path, nm, sizeof(path));
+		path[strlen(path) - 2] = '\0';
+		ret = sysFsOpen(path, SYS_O_RDONLY, fd, NULL, 0);
+		if (ret == 0 && *fd >= 0)
+			return 0;
+	} else
+	{
+		ustrlcpy(path, "/dev_bdvd/VIDEO_TS/", sizeof(path));
+		ustrlcat(path, nm, sizeof(path));
+		ustrlcat(path, ";1", sizeof(path));
+		ret = sysFsOpen(path, SYS_O_RDONLY, fd, NULL, 0);
+		if (ret == 0 && *fd >= 0)
+			return 0;
+	}
+
+	return -1;
+}
+
+/* Same idea for the size. Returns 0 and the size when one spelling works. */
+static int stat_video_ts_member(const char *nm, uint64_t *size)
+{
+	char path[600];
+	sysFSStat st;
+
+	ustrlcpy(path, "/dev_bdvd/VIDEO_TS/", sizeof(path));
+	ustrlcat(path, nm, sizeof(path));
+	if (sysFsStat(path, &st) == 0 && st.st_size > 0)
+	{
+		*size = st.st_size;
+		return 0;
+	}
+
+	if (strlen(nm) > 2 && strcmp(nm + strlen(nm) - 2, ";1") == 0)
+	{
+		ustrlcpy(path, "/dev_bdvd/VIDEO_TS/", sizeof(path));
+		ustrlcat(path, nm, sizeof(path));
+		path[strlen(path) - 2] = '\0';
+		if (sysFsStat(path, &st) == 0 && st.st_size > 0)
+		{
+			*size = st.st_size;
+			return 0;
+		}
+		return -1;
+	}
+
+	ustrlcpy(path, "/dev_bdvd/VIDEO_TS/", sizeof(path));
+	ustrlcat(path, nm, sizeof(path));
+	ustrlcat(path, ";1", sizeof(path));
+	if (sysFsStat(path, &st) == 0 && st.st_size > 0)
+	{
+		*size = st.st_size;
+		return 0;
+	}
+
+	return -1;
+}
+
 static int enumerate(const char *dir, copy_entry **out, uint32_t *out_count,
-                     uint64_t *out_total)
+                     uint64_t *out_total, uint32_t *out_unsized)
 {
 	s32 fd = -1;
 	uint64_t read = 0;
 	copy_entry *list = NULL;
 	uint32_t count = 0, cap = 0;
 	uint64_t total = 0;
+	uint32_t unsized = 0;
 
-	if (sysFsOpendir(dir, &fd) != 0)
+	(void)dir;
+	if (sysFsOpendir("/dev_bdvd/VIDEO_TS", &fd) != 0)
 		return -1;
 
 	for (;;)
 	{
 		sysFSDirent ent;
-		sysFSStat  st;
-		char child[600];
 		char nm[257];
 		size_t l;
 
@@ -406,12 +482,6 @@ static int enumerate(const char *dir, copy_entry **out, uint32_t *out_count,
 		if (nm[0] == '.' && (nm[1] == '\0' || (nm[1] == '.' && nm[2] == '\0')))
 			continue;
 
-		ustrlcpy(child, dir, sizeof(child));
-		ustrlcat(child, "/", sizeof(child));
-		ustrlcat(child, nm, sizeof(child));
-		if (sysFsStat(child, &st) != 0)
-			continue;
-
 		if (count == cap)
 		{
 			copy_entry *grown;
@@ -424,8 +494,21 @@ static int enumerate(const char *dir, copy_entry **out, uint32_t *out_count,
 
 		ustrlcpy(list[count].name, nm, sizeof(list[count].name));
 		strip_version(list[count].clean, nm, sizeof(list[count].clean));
-		list[count].size = st.st_size;
-		total += st.st_size;
+		list[count].size = 0;
+
+		/* A member whose size could not be stat'ed is still kept: the old
+		 * code dropped it here, which is how a 6 GB disc turned into a 48 KB
+		 * "dump" with no video in it. The copy then reads it until EOF. */
+		if (stat_video_ts_member(nm, &list[count].size) == 0)
+		{
+			list[count].sized = 1;
+			total += list[count].size;
+		}
+		else
+		{
+			list[count].sized = 0;
+			unsized++;
+		}
 		count++;
 	}
 
@@ -433,6 +516,8 @@ static int enumerate(const char *dir, copy_entry **out, uint32_t *out_count,
 	*out = list;
 	*out_count = count;
 	*out_total = total;
+	if (out_unsized != NULL)
+		*out_unsized = unsized;
 	return 0;
 }
 
@@ -441,8 +526,10 @@ int rip_copy_video_ts(const char *out_dir, int patch_region,
 {
 	copy_entry *list = NULL;
 	uint32_t count = 0;
-	uint64_t total = 0;
+uint64_t total = 0;
 	uint64_t done = 0;
+	uint64_t done_in_file = 0;
+	uint32_t unsized = 0;
 	uint32_t i;
 	int cancelled = 0;
 
@@ -450,7 +537,8 @@ int rip_copy_video_ts(const char *out_dir, int patch_region,
 	ustrlcpy(st->out_path, out_dir, sizeof(st->out_path));
 	ustrlcpy(st->message, "Reading disc directory", sizeof(st->message));
 
-	if (enumerate("/dev_bdvd/VIDEO_TS", &list, &count, &total) != 0 || count == 0)
+	if (enumerate("/dev_bdvd/VIDEO_TS", &list, &count, &total, &unsized) != 0 ||
+	    count == 0)
 	{
 		ustrlcpy(st->message, "VIDEO_TS not found on the disc", sizeof(st->message));
 		st->failed = 1;
@@ -459,29 +547,36 @@ int rip_copy_video_ts(const char *out_dir, int patch_region,
 		return -1;
 	}
 
+	/* When a member had no usable size the total is only a guess, so it is
+	 * grown as real bytes arrive. Otherwise the progress bar would sit at a
+	 * few percent for the whole copy. */
 	st->total = total;
 	fs_mkdir_p(out_dir, 0777);
 
 	for (i = 0; i < count && !cancelled; i++)
 	{
-		char src[600];
 		char dst[700];
 		s32  sfd = -1;
 		int  failed = 0;
-
-		ustrlcpy(src, "/dev_bdvd/VIDEO_TS/", sizeof(src));
-		ustrlcat(src, list[i].name, sizeof(src));
 
 		ustrlcpy(dst, out_dir, sizeof(dst));
 		ustrlcat(dst, "/", sizeof(dst));
 		ustrlcat(dst, list[i].clean, sizeof(dst));
 
-		if (sysFsOpen(src, SYS_O_RDONLY, &sfd, NULL, 0) != 0 || sfd < 0)
-			continue;   /* skip an unreadable member rather than abort */
+		if (open_video_ts_member(list[i].name, &sfd) != 0)
+		{
+			/* No longer skipped in silence: a member that cannot be opened
+			 * means the copy is incomplete and must say so. */
+			snprintf(st->message, sizeof(st->message),
+			         "Cannot open %.100s on the disc", list[i].clean);
+			st->failed = 1;
+			st->finished = 1;
+			free(list);
+			return -1;
+		}
 
 		{
 			int dfd = fs_create(dst, 0777);
-			uint64_t left = list[i].size;
 
 			if (dfd < 0)
 			{
@@ -494,17 +589,31 @@ int rip_copy_video_ts(const char *out_dir, int patch_region,
 				return -1;
 			}
 
-			while (left > 0)
+			/* Read until EOF instead of trusting st_size. The bridge reports
+			 * sizes that do not survive being used as a byte count: the old
+			 * loop truncated or aborted on the first mismatch, and a short
+			 * final read was treated as a hard error. */
+			for (;;)
 			{
-				size_t want = (left > COPY_CHUNK) ? COPY_CHUNK : (size_t)left;
-				if (io_read_all(sfd, g_copy, want) != 0 ||
-				    io_write_all(dfd, g_copy, want) != 0)
+				uint64_t got = 0;
+				uint64_t room = (list[i].sized && list[i].size > done_in_file)
+				              ? (list[i].size - done_in_file) : COPY_CHUNK;
+				size_t  want = (room > COPY_CHUNK) ? COPY_CHUNK : (size_t)room;
+
+				if (want == 0)
+					break;
+
+				if (sysFsRead(sfd, g_copy, (u64)want, &got) != 0 || got == 0)
+					break;                     /* end of file */
+
+				if (io_write_all(dfd, g_copy, (size_t)got) != 0)
 				{
 					failed = 1;
 					break;
 				}
-				left -= want;
-				done += want;
+
+				done_in_file += got;
+				done += got;
 
 				if (report(cb, ctx, st, done))
 				{
@@ -518,6 +627,28 @@ int rip_copy_video_ts(const char *out_dir, int patch_region,
 			sysFsClose(dfd);
 			sysFsClose(sfd);
 		}
+
+		if (list[i].sized && done_in_file != list[i].size)
+		{
+			/* The size was known and the bytes do not match it, so the
+			 * member on the disc is not what stat claimed. */
+			snprintf(st->message, sizeof(st->message),
+			         "%.100s copied %llu of %llu bytes",
+			         list[i].clean,
+			         (unsigned long long)done_in_file,
+			         (unsigned long long)list[i].size);
+			st->failed = 1;
+			st->finished = 1;
+			free(list);
+			return -1;
+		}
+
+		/* With no trustworthy upfront total, extend it by what was really
+		 * written so the progress display stays meaningful. */
+		if (unsized > 0)
+			st->total += done_in_file;
+
+		done_in_file = 0;
 
 		if (failed)
 		{

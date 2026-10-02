@@ -56,6 +56,7 @@ typedef struct
 	uint8_t data[FAKE_MAX_DATA];
 	size_t  len;
 	int     used;
+	int     hidden;   /* stat fails, but readdir/open still see it */
 } fake_file;
 
 typedef struct
@@ -67,6 +68,18 @@ typedef struct
 static fake_file g_files[FAKE_MAX_FILES];
 static fake_dir  g_dirs[FAKE_MAX_DIRS];
 static uint64_t  g_free_bytes = 4ULL * 1024 * 1024 * 1024;
+
+#define FAKE_MAX_OPEN_DIRS 8
+#define FAKE_MAX_ENTRIES   64
+
+/* open directory handles, so readdir can walk a listing one entry at a time */
+static struct
+{
+	int  used;
+	int  next;
+	int  count;
+	char entries[FAKE_MAX_ENTRIES][64];
+} g_dh[FAKE_MAX_OPEN_DIRS];
 
 static fake_file *file_find(const char *path)
 {
@@ -106,12 +119,24 @@ int  fakefs_get(const char *path, void *out, size_t len);
 int  fakefs_exists(const char *path);
 uint64_t fakefs_free(void);
 void fakefs_set_free(uint64_t bytes);
+void fakefs_hide(const char *path);
+
+/* Makes stat() fail for one member while the directory listing and open() keep
+ * working. This is what the bdvd bridge does with the large VOB files, and it
+ * is what turned a 6 GB disc into a 48 KB "dump". */
+void fakefs_hide(const char *path)
+{
+	fake_file *f = file_find(path);
+	if (f != NULL)
+		f->hidden = 1;
+}
 
 void fakefs_reset(void)
 {
 	memset(g_files, 0, sizeof(g_files));
 	memset(g_dirs, 0, sizeof(g_dirs));
 	memset(g_fd, 0, sizeof(g_fd));
+	memset(g_dh, 0, sizeof(g_dh));
 	g_free_bytes = 4ULL * 1024 * 1024 * 1024;
 }
 
@@ -271,6 +296,11 @@ s32 sysFsStat(const char *path, sysFSStat *stat)
 	size_t plen = strlen(path);
 	int i;
 
+	/* A hidden file behaves as if stat cannot see it, while the directory
+	 * listing and open still can. */
+	if (f != NULL && f->hidden)
+		return -2;
+
 	if (f == NULL)
 	{
 		for (i = 0; i < FAKE_MAX_DIRS; i++)
@@ -339,12 +369,86 @@ s32 sysFsGetFreeSize(const char *path, u32 *blockSize, u64 *freeBlocks)
 	return 0;
 }
 
-/* The directory API is not exercised by the xRegistry tests. */
-s32 sysFsOpendir(const char *path, s32 *fd) { (void)path; *fd = -1; return -2; }
-s32 sysFsClosedir(s32 fd) { (void)fd; return 0; }
+/* ------------------------------------------------------------- directory API */
+
+s32 sysFsOpendir(const char *path, s32 *fd)
+{
+	size_t plen = strlen(path);
+	int slot, i, n = 0;
+
+	for (slot = 0; slot < FAKE_MAX_OPEN_DIRS; slot++)
+		if (!g_dh[slot].used)
+			break;
+	if (slot == FAKE_MAX_OPEN_DIRS)
+		return -4;
+
+	memset(&g_dh[slot], 0, sizeof(g_dh[slot]));
+	g_dh[slot].used = 1;
+
+	/* Leave room for the "." and ".." entries added below. */
+	for (i = 0; i < FAKE_MAX_FILES && n < FAKE_MAX_ENTRIES - 2; i++)
+	{
+		const char *base;
+		size_t nlen;
+
+		if (!g_files[i].used)
+			continue;
+		if (strncmp(g_files[i].name, path, plen) != 0 ||
+		    g_files[i].name[plen] != '/')
+			continue;
+
+		base = g_files[i].name + plen + 1;
+		if (strchr(base, '/') != NULL)
+			continue;                       /* not a direct child */
+
+		nlen = strlen(base);
+		if (nlen >= sizeof(g_dh[slot].entries[0]))
+			continue;
+		snprintf(g_dh[slot].entries[n++], sizeof(g_dh[slot].entries[0]),
+		         "%s", base);
+	}
+
+	/* "." and "..", like the real thing */
+	snprintf(g_dh[slot].entries[n],     sizeof(g_dh[slot].entries[0]), ".");
+	snprintf(g_dh[slot].entries[n + 1], sizeof(g_dh[slot].entries[0]), "..");
+	g_dh[slot].count = n + 2;
+
+	*fd = slot;
+	return 0;
+}
+
 s32 sysFsReaddir(s32 fd, sysFSDirent *entry, u64 *read)
 {
-	(void)fd; (void)entry; *read = 0; return 0;
+	const char *name;
+	size_t nlen;
+
+	if (fd < 0 || fd >= FAKE_MAX_OPEN_DIRS || !g_dh[fd].used)
+		return -2;
+
+	if (g_dh[fd].next >= g_dh[fd].count)
+	{
+		*read = 0;
+		return 0;
+	}
+
+	name = g_dh[fd].entries[g_dh[fd].next++];
+	nlen = strlen(name);
+
+	memset(entry, 0, sizeof(*entry));
+	entry->d_type   = (nlen == 1 || (nlen == 2 && name[1] == '.')) ? 4 : 8;
+	entry->d_namlen = (u8)nlen;
+	memcpy(entry->d_name, name, nlen);
+
+	*read = sizeof(sysFSDirent);
+	return 0;
+}
+
+s32 sysFsClosedir(s32 fd)
+{
+	if (fd < 0 || fd >= FAKE_MAX_OPEN_DIRS)
+		return -2;
+	g_dh[fd].used = 0;
+	return 0;
 }
 
 s32 sysLv2FsFsync(s32 fd) { (void)fd; return 0; }
