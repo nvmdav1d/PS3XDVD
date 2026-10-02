@@ -3,3 +3,9 @@ build/
 *.elf
 *.pkg
 *.o
+
+# host compile check leftovers (MSVC / gcc)
+*.obj
+*.pdb
+*.exe
+*.idb
