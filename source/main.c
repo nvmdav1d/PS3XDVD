@@ -69,7 +69,11 @@ static int         g_reg_readable;     /* xRegistry.sys itself could be read    
 
 static disc_info   g_disc;
 static int         g_disc_sel;
-static int         g_dump_mode;         /* 0 = 1:1 ISO, 1 = VIDEO_TS copy */
+/* Defaults to the VIDEO_TS folder copy. The 1:1 sector dump needs
+ * sys_storage_open on the physical drive, which is refused on plenty of
+ * working setups, and which is also the operation that can wedge a console.
+ * It stays available, just not as the first thing a user presses. */
+static int         g_dump_mode = 1;   /* 0 = 1:1 ISO, 1 = VIDEO_TS folder */
 static int         g_patch_region;
 static int         g_dest;
 
@@ -1050,9 +1054,12 @@ static void start_raw_dump(void)
 	if (disc_sector_count(&sectors, g_size_how, sizeof(g_size_how)) != 0 ||
 	    sectors == 0)
 	{
-		show_dialog(DLG_ERROR, "Drive not accessible",
-		            "The raw drive gave no usable size (%s).\n\n"
-		            "Use the VIDEO_TS folder copy instead.", g_size_how);
+		show_dialog(DLG_ERROR, "Raw drive access refused",
+		            "This console would not open the Blu-ray drive (%s).\n\n"
+		            "The 1:1 ISO dump needs that, so it cannot run here.\n\n"
+		            "Use Dump mode = VIDEO_TS folder, which only reads files\n"
+		            "and works everywhere.", g_size_how);
+		g_dump_mode = 1;
 		return;
 	}
 
