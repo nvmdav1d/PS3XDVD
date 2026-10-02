@@ -27,6 +27,10 @@ typedef struct
 	uint32_t mat_end;
 	uint32_t fp_pgc;
 	uint32_t num_titles;
+
+	/* Why VIDEO_TS.IFO could not be used: 0 ok, 1 open/read failed,
+	 * 2 magic mismatch (present but not a DVD-Video VMG). */
+	int      ifo_err;
 } disc_info;
 
 /* Reads /dev_bdvd. Returns 0 when a DVD-Video disc was recognised. */

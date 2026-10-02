@@ -129,12 +129,19 @@ int disc_probe(disc_info *out)
 
 	memset(ifo, 0, sizeof(ifo));
 	if (read_video_ts_ifo(ifo, sizeof(ifo)) != 0)
+	{
+		out->ifo_err = 1;
 		return -1;
+	}
 
 	if (memcmp(ifo, "DVDVIDEO-VMG", 12) != 0)
-		return -1;   /* VIDEO_TS exists but this is not a DVD-Video VMG */
+	{
+		out->ifo_err = 2;   /* VIDEO_TS exists, but this is not a DVD-Video VMG */
+		return -1;
+	}
 
-	out->ifo_ok = 1;
+	out->ifo_err = 0;
+	out->ifo_ok  = 1;
 
 	/* VMGI_MAT layout, big endian:
 	 *   0x00 "DVDVIDEO-VMG"   0x04 vmg last sector      0x0C vmg ifo last sector

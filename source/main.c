@@ -529,6 +529,7 @@ static void draw_region(void)
 
 /* -------------------------------------------------------------------- disc - */
 
+/* Draws the Disc page, including the "why" when the disc was rejected. */
 static void draw_disc(void)
 {
 	int x = MARGIN;
@@ -546,8 +547,27 @@ static void draw_disc(void)
 	y += 58;
 	if (!g_disc.present || !g_disc.ifo_ok)
 	{
-		gfx_text(x + 20, y,      COL_WARN, "No DVD-Video disc loaded", 2);
-		gfx_text(x + 20, y + 28, COL_DIM,  "Insert one and press TRIANGLE", 2);
+		if (g_disc.ifo_err == 1)
+		{
+			gfx_text(x + 20, y,      COL_ERR,  "VIDEO_TS.IFO cannot be opened", 2);
+			gfx_text(x + 20, y + 26, COL_DIM,
+			         "The folder is there but the file will not read.", 2);
+			gfx_text(x + 20, y + 52, COL_DIM,
+			         "Another process may be holding the disc.", 2);
+		}
+		else if (g_disc.ifo_err == 2)
+		{
+			gfx_text(x + 20, y,      COL_ERR,  "VIDEO_TS.IFO is not DVD-Video", 2);
+			gfx_text(x + 20, y + 26, COL_DIM,
+			         "The magic is wrong, so this volume is not DVD-Video.", 2);
+			gfx_text(x + 20, y + 52, COL_DIM,
+			         "Audio CDs, data DVDs and ripped folders do not qualify.", 2);
+		}
+		else
+		{
+			gfx_text(x + 20, y,      COL_WARN, "No disc in the drive", 2);
+			gfx_text(x + 20, y + 26, COL_DIM,  "Insert one, then press TRIANGLE", 2);
+		}
 	}
 	else
 	{
@@ -627,22 +647,19 @@ static void draw_disc(void)
 		gfx_text_box(x + 20, y + 40, 560, 20,
 		             (need > 0 && have < need) ? COL_ERR : COL_DIM, buf, 2, ALIGN_LEFT);
 
-		if (g_dump_mode == 0 && !g_size_valid)
-		{
-			snprintf(buf, sizeof(buf), "Drive did not report a size (%s)", g_size_how);
-			gfx_text_box(x + 20, y + 66, 560, 20, COL_WARN, buf, 2, ALIGN_LEFT);
-		}
-		else if (g_dump_mode == 0)
+		if (g_dump_mode == 0)
 			gfx_text_box(x + 20, y + 66, 560, 20, COL_DIM,
-			             g_size_how, 2, ALIGN_LEFT);
+			             "Size is measured when the dump starts", 2, ALIGN_LEFT);
 		else
 			gfx_text_box(x + 20, y + 66, 560, 20, COL_DIM,
 			             "Folder copy needs roughly the disc size", 2, ALIGN_LEFT);
 	}
 
-	gfx_text(MARGIN, PANEL_Y + 368, COL_DIM,
-	         "1:1 ISO needs CFW/HEN for raw drive access. VIDEO_TS copy works on any firmware.", 2);
+	gfx_text(MARGIN, PANEL_Y + 368, COL_WARN,
+	         "1:1 ISO opens the physical drive and can lock up the console.", 2);
 	gfx_text(MARGIN, PANEL_Y + 390, COL_DIM,
+	         "The VIDEO_TS folder copy only uses the filesystem and is safe.", 2);
+	gfx_text(MARGIN, PANEL_Y + 412, COL_DIM,
 	         "The patch only clears the prohibited-region byte in VIDEO_TS.IFO.", 2);
 }
 
@@ -816,14 +833,18 @@ static void refresh_registry(void)
 		g_reg_loaded = 1;
 }
 
-/* Measuring the disc touches the drive, so it happens on rescan / mode change
- * and never inside the draw loop. */
+/* Disc measurement that stays entirely inside the filesystem.
+ *
+ * Deliberately does NOT touch the physical drive: sys_storage_open (600) and
+ * sys_storage_get_device_info (609) are root-only and reach the Blu-ray drive
+ * coprocessor. Calling them during a rescan wedged GameOS on real hardware, so
+ * the drive is only ever opened from the 1:1 dump path, after the user has
+ * explicitly asked for one. See disc_sector_count() for the size probe. */
 static void measure_disc(void)
 {
 	g_size_valid = 0;
 	g_disc_bytes = 0;
-	g_ts_bytes   = 0;
-	ustrlcpy(g_size_how, "unknown", sizeof(g_size_how));
+	ustrlcpy(g_size_how, "not measured", sizeof(g_size_how));
 
 	if (!g_disc.present || !g_disc.ifo_ok)
 		return;
@@ -832,18 +853,6 @@ static void measure_disc(void)
 
 	if (disc_video_ts_size(&g_ts_bytes) != 0)
 		g_ts_bytes = 0;
-
-	if (disc_sector_count(&g_disc_bytes, g_size_how, sizeof(g_size_how)) == 0 &&
-	    g_disc_bytes > 0)
-	{
-		g_size_valid = 1;
-	}
-	else
-	{
-		/* fall back to what the filesystem says the disc holds */
-		g_disc_bytes = g_ts_bytes;
-		ustrlcpy(g_size_how, "estimated from VIDEO_TS", sizeof(g_size_how));
-	}
 }
 
 static void refresh_disc(void)
@@ -983,16 +992,65 @@ static void apply_region(void)
 	            "change to take effect.", written);
 }
 
+/* Ask first, then measure the disc and dump it. This is the only place in the
+ * whole app that opens the physical drive, which is why it is behind a
+ * confirmation rather than run on the rescan. */
+static void start_raw_dump(void)
+{
+	char a[32], b[32];
+	uint64_t sectors = 0;
+	uint64_t free_bytes;
+	char file[740];
+	const char *dev = g_dev[g_dest];
+
+	if (disc_sector_count(&sectors, g_size_how, sizeof(g_size_how)) != 0 ||
+	    sectors == 0)
+	{
+		show_dialog(DLG_ERROR, "Drive not accessible",
+		            "The raw drive gave no usable size (%s).\n\n"
+		            "Use the VIDEO_TS folder copy instead.", g_size_how);
+		return;
+	}
+
+	free_bytes = device_free(dev);
+	if (free_bytes < sectors * 2048ULL)
+	{
+		format_size(sectors * 2048ULL, a, sizeof(a));
+		format_size(free_bytes, b, sizeof(b));
+		show_dialog(DLG_ERROR, "Not enough space",
+		            "Need %s, %s has %s free.", a, dev, b);
+		return;
+	}
+
+	g_disc_bytes  = sectors * 2048ULL;
+	g_size_valid  = 1;
+	g_abort_rip   = 0;
+	g_rip_started = 0;
+	g_rip_start_ms = 0;
+	g_rip_last_draw = input_millis();
+
+	out_file_for(file, sizeof(file), dev, g_basename);
+	rip_raw_iso(file, sectors, g_patch_region, rip_progress_cb, NULL, &g_rip);
+}
+
 static void start_rip(void)
 {
 	char dir[700];
-	char file[740];
 	const char *dev = g_dev[g_dest];
 
 	if (!g_disc.present || !g_disc.ifo_ok)
 	{
-		show_dialog(DLG_ERROR, "No disc",
-		            "Insert a DVD-Video disc and press TRIANGLE to rescan.");
+		if (g_disc.ifo_err == 1)
+			show_dialog(DLG_ERROR, "Cannot read the disc",
+			            "VIDEO_TS exists but VIDEO_TS.IFO could not be opened.\n\n"
+			            "Another process may be holding the disc.");
+		else if (g_disc.ifo_err == 2)
+			show_dialog(DLG_ERROR, "Not a DVD-Video disc",
+			            "VIDEO_TS is present but VIDEO_TS.IFO is not a DVD-Video\n"
+			            "volume. This app only handles DVD-Video.");
+		else
+			show_dialog(DLG_ERROR, "No disc",
+			            "Insert a DVD-Video disc and press TRIANGLE to rescan.");
 		return;
 	}
 
@@ -1000,35 +1058,10 @@ static void start_rip(void)
 	out_dir_for(dir, sizeof(dir), dev, g_basename);
 	fs_mkdir_p(dir, 0777);
 
-	g_abort_rip    = 0;
-	g_rip_started  = 0;
-	g_rip_start_ms = 0;
-	g_rip_last_draw = input_millis();
-
 	if (g_dump_mode == 0)
 	{
-		char a[32], b[32];
-		uint64_t free_bytes = device_free(dev);
-
-		if (!g_size_valid || g_disc_bytes == 0)
-		{
-			show_dialog(DLG_ERROR, "Drive not accessible",
-			            "The raw drive gave no usable size (%s).\n"
-			            "Use the VIDEO_TS folder copy instead.", g_size_how);
-			return;
-		}
-		if (free_bytes < g_disc_bytes)
-		{
-			format_size(g_disc_bytes, a, sizeof(a));
-			format_size(free_bytes, b, sizeof(b));
-			show_dialog(DLG_ERROR, "Not enough space",
-			            "Need %s, %s has %s free.", a, dev, b);
-			return;
-		}
-
-		out_file_for(file, sizeof(file), dev, g_basename);
-		rip_raw_iso(file, g_disc_bytes / 2048ULL, g_patch_region,
-		            rip_progress_cb, NULL, &g_rip);
+		/* The drive is opened from here on, and only from here. */
+		start_raw_dump();
 	}
 	else
 	{
@@ -1044,6 +1077,11 @@ static void start_rip(void)
 			return;
 		}
 
+		g_abort_rip    = 0;
+		g_rip_started  = 0;
+		g_rip_start_ms = 0;
+		g_rip_last_draw = input_millis();
+
 		rip_copy_video_ts(dir, g_patch_region, rip_progress_cb, NULL, &g_rip);
 	}
 
@@ -1055,7 +1093,7 @@ static void start_rip(void)
 	else if (g_rip.ok)
 	{
 		show_dialog(DLG_INFO, "Dump finished",
-		            "%s\n\n%s\n\n%s written", g_rip.out_path, g_rip.message,
+		            "%s\n\n%s\n\n%s", g_rip.out_path, g_rip.message,
 		            g_rip.patched ? "Region mask cleared." : "Region kept as is.");
 	}
 	else
@@ -1177,15 +1215,21 @@ static void handle_registry(void)
 	if (input_pressed(B_CROSS))
 	{
 		if (g_registry_sel == 0)
+		{
 			make_backup();
+		}
 		else if (g_registry_sel == 1)
+		{
 			ask_restore();
+		}
 		else
+		{
 			show_dialog(DLG_YESNO, "Restart the console?",
 			            "The console will restart now.\n\n"
 			            "If this app is still running afterwards, your firmware "
 			            "refused the request and you will need to power-cycle by hand.");
 			g_dlg_act = DLGACT_RESTART;
+		}
 	}
 }
 
