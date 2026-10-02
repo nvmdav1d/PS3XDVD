@@ -114,23 +114,14 @@ jobs:
             rm -rf "$d"
           done
           echo
-          echo "### where is libpad?"
-          find "$PS3DEV" -name 'libpad*' 2>/dev/null | head -5 | sed 's/^/  /'
-          echo "  ---"
-          echo "### which archive actually defines ioPadInit?"
-          NM=$(command -v ppu-nm || command -v powerpc64-ps3-elf-nm || true)
-          if [ -z "$NM" ]; then
-            echo "  ppu-nm not on PATH"
-          else
-            found=0
-            for a in $(find "$PS3DEV" -name '*.a' 2>/dev/null); do
-              if "$NM" "$a" 2>/dev/null | grep -qE ' T ioPadInit'; then
-                echo "  DEFINES ioPadInit: $a"
-                found=1
-              fi
-            done
-            [ "$found" -eq 0 ] && echo "  NO ARCHIVE DEFINES ioPadInit"
-          fi
+          echo "### every library on the link line actually present?"
+          miss=0
+          for l in SDL sysutil rsx gcm_sys io audio rt lv2 m; do
+            f=$(find "$PS3DEV" -name "lib$l.a" 2>/dev/null | head -1)
+            if [ -z "$f" ]; then echo "  MISSING  lib$l.a"; miss=1;
+            else printf '  ok       %-16s %s\n' "lib$l.a" "$f"; fi
+          done
+          [ "$miss" -eq 0 ] && echo "  all present"
 
       - name: Fail early with a clear message if SDL 1.3 is absent
         run: |

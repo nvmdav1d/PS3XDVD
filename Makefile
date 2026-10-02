@@ -54,9 +54,12 @@ LIBPATHS  := -L$(PSL1GHT)/ppu/lib \
 LDFLAGS   += $(LIBPATHS)
 
 # SDL 1.3 is a static library that pulls in the whole RSX/video/audio stack, so
-# its undefined symbols must be resolved after it. This mirrors the link line
-# that ships with the hldtux/ps3dev container image.
-LIBS      := -lSDL -lpad -lsysutil -lrsx -lgcm_sys -lio -laudio \
+# its undefined symbols must be resolved after it.
+#
+# There is deliberately no -lpad: the ioPad* entry points live in libio, which is
+# what PSL1GHT's own samples/input/padtest links (-lio -lnet). The hldtux/ps3dev
+# image does not ship a libpad.a at all, so asking for one breaks the link.
+LIBS      := -lSDL -lsysutil -lrsx -lgcm_sys -lio -laudio \
              -lrt -llv2 -lm
 
 all:      $(TARGET).self
