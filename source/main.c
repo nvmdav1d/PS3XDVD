@@ -50,6 +50,14 @@ typedef enum
 	DLG_YESNO
 } dialog_kind;
 
+/* What a DLG_YESNO should actually do when the user confirms. */
+typedef enum
+{
+	DLGACT_NONE = 0,
+	DLGACT_RESTORE,
+	DLGACT_QUIT
+} dialog_action;
+
 static screen_id   g_screen = SCR_HOME;
 static int         g_home_sel;
 static int         g_region_tab;        /* 0 = preset, 1 = manual */
@@ -76,7 +84,8 @@ static char        g_dev[9][24];
 static int         g_dev_count;
 
 static int         g_registry_sel;
-static dialog_kind g_dlg;
+static dialog_kind  g_dlg;
+static dialog_action g_dlg_act;
 static char        g_dlg_title[64];
 static char        g_dlg_body[512];
 static int         g_running = 1;
@@ -139,6 +148,8 @@ static void show_dialog(dialog_kind kind, const char *title, const char *fmt, ..
 	va_end(ap);
 
 	g_dlg = kind;
+	if (kind != DLG_YESNO)
+		g_dlg_act = DLGACT_NONE;
 }
 
 /* ----------------------------------------------------------------- drawing -- */
@@ -904,6 +915,7 @@ static void ask_restore(void)
 	show_dialog(DLG_YESNO, "Overwrite the registry?",
 	            "The current settings in %s will be replaced by the copy on the "
 	            "HDD. Restart the console afterwards.", XREG_PATH);
+	g_dlg_act = DLGACT_RESTORE;
 }
 
 static void do_restore(void)
@@ -1066,7 +1078,7 @@ static void handle_region(void)
 	if (g_region_sel >= count)
 		g_region_sel = count - 1;
 
-	if (input_repeat(B_UP | B_DOWN, &rep, 420, 130))
+	if (input_repeat(B_UP | B_DOWN, &rep, INPUT_REPEAT_DELAY_MS, INPUT_REPEAT_RATE_MS))
 	{
 		g_region_sel += input_held(B_DOWN) ? 1 : -1;
 		if (g_region_sel < 0)        g_region_sel = count - 1;
@@ -1112,7 +1124,7 @@ static void handle_disc(void)
 	unsigned long rep = 0;
 	int d;
 
-	if (input_repeat(B_UP | B_DOWN, &rep, 420, 130))
+	if (input_repeat(B_UP | B_DOWN, &rep, INPUT_REPEAT_DELAY_MS, INPUT_REPEAT_RATE_MS))
 	{
 		g_disc_sel += input_held(B_DOWN) ? 1 : -1;
 		if (g_disc_sel < 0)  g_disc_sel = 3;
@@ -1183,7 +1195,7 @@ static void handle_home(void)
 {
 	unsigned long rep = 0;
 
-	if (input_repeat(B_UP | B_DOWN, &rep, 420, 130))
+	if (input_repeat(B_UP | B_DOWN, &rep, INPUT_REPEAT_DELAY_MS, INPUT_REPEAT_RATE_MS))
 		g_home_sel = (g_home_sel + (input_held(B_DOWN) ? 1 : 4)) % 5;
 
 	if (input_pressed(B_CROSS))
@@ -1194,7 +1206,13 @@ static void handle_home(void)
 		case 1: g_screen = SCR_DISC;     g_disc_sel = 3;    break;
 		case 2: g_screen = SCR_REGISTRY; g_registry_sel = 0; break;
 		case 3: g_screen = SCR_HELP;     break;
-		default: g_running = 0; return;
+		default:
+			/* Confirmation, because an accidental exit on a five item list
+			 * used to look like a crash. */
+			show_dialog(DLG_YESNO, "Quit to the XMB?",
+			            "Close DVD Region Tools and return to the console menu.");
+			g_dlg_act = DLGACT_QUIT;
+			break;
 		}
 	}
 
@@ -1275,17 +1293,29 @@ static void handle_dialog(void)
 	{
 		if (input_pressed(B_CROSS))
 		{
-			g_dlg = DLG_NONE;
-			do_restore();
+			dialog_action act = g_dlg_act;
+			g_dlg     = DLG_NONE;
+			g_dlg_act = DLGACT_NONE;
+
+			if (act == DLGACT_RESTORE)
+				do_restore();
+			else if (act == DLGACT_QUIT)
+				g_running = 0;
 			return;
 		}
 		if (input_pressed(B_CIRCLE))
-			g_dlg = DLG_NONE;
+		{
+			g_dlg     = DLG_NONE;
+			g_dlg_act = DLGACT_NONE;
+		}
 		return;
 	}
 
 	if (input_pressed(B_CROSS) || input_pressed(B_CIRCLE))
-		g_dlg = DLG_NONE;
+	{
+		g_dlg     = DLG_NONE;
+		g_dlg_act = DLGACT_NONE;
+	}
 }
 
 int main(int argc, char **argv)
@@ -1323,6 +1353,13 @@ int main(int argc, char **argv)
 		usleep(16666);
 	}
 
-	gfx_quit();
+	/*
+	 * Tear down with sys_ppu_exit rather than returning from main: a PSL1GHT
+	 * SELF has no C runtime unwinding to fall back on, and letting SDL_Quit()
+	 * run first is what made the old quit path look like a crash. Returning to
+	 * the XMB is the process exit here.
+	 */
+	input_exit_app();
+
 	return 0;
 }

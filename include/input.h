@@ -32,7 +32,14 @@ uint32_t input_mask(void);
 
 /* Auto-repeat helper for list navigation.
  * Fires immediately on press, then after `delay_ms`, then every `rate_ms`.
- * `state` must be a zero-initialised unsigned long owned by the caller. */
+ * `state` must be a zero-initialised unsigned long owned by the caller.
+ *
+ * The defaults below are deliberately unhurried: these lists are five items
+ * long and overshooting a selection is worse than having to wait.
+ */
+#define INPUT_REPEAT_DELAY_MS 500u
+#define INPUT_REPEAT_RATE_MS  220u
+
 int  input_repeat(uint32_t mask, unsigned long *state, uint32_t delay_ms,
                   uint32_t rate_ms);
 
