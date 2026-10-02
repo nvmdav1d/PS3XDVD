@@ -93,6 +93,12 @@ static int         g_running = 1;
 static int         g_abort_rip;
 static rip_status  g_rip;
 
+/* Frame counter, shown on the HOME page: it distinguishes "the app is alive but
+ * crawling" from "the app has stopped responding" without a debugger. */
+static uint32_t    g_frames;
+static uint32_t    g_fps;
+static uint32_t    g_fps_mark;
+
 /* progress timing, reset for every job */
 static uint32_t    g_rip_start_ms;
 static uint32_t    g_rip_last_draw;
@@ -116,14 +122,43 @@ static void build_devices(void)
 	}
 }
 
+/*
+ * Free space comes from sysFsGetFreeSize, which is real filesystem work and
+ * not free on a spinning disk. It used to be called once per frame from the
+ * draw path, i.e. 60 queries a second just to paint a label, which showed up
+ * as lag before anything else went wrong. Cache it per device and refresh
+ * roughly twice a second.
+ */
+static uint64_t g_free_val[9];
+static uint32_t g_free_age[9];
+
+static int device_index(const char *dev)
+{
+	int i;
+	for (i = 0; i < g_dev_count; i++)
+		if (strcmp(g_dev[i], dev) == 0)
+			return i;
+	return -1;
+}
+
 static uint64_t device_free(const char *dev)
 {
 	char p[32];
 	uint64_t free_bytes = 0;
+	int idx = device_index(dev);
+
+	if (idx >= 0 && g_free_age[idx] < 30u)
+		return g_free_val[idx];   /* still fresh */
 
 	snprintf(p, sizeof(p), "%s/", dev);
 	if (fs_free_space(p, &free_bytes) != 0)
-		return 0;
+		free_bytes = 0;
+
+	if (idx >= 0)
+	{
+		g_free_val[idx] = free_bytes;
+		g_free_age[idx] = 0;
+	}
 	return free_bytes;
 }
 
@@ -370,6 +405,11 @@ static void draw_home(void)
 		         g_pad_last_len, g_pad_last_word, input_mask());
 		gfx_text(x + 20, y + 148,
 		         g_pad_last_len ? COL_OK : COL_DIM, dbg, 2);
+
+		snprintf(dbg, sizeof(dbg), "frames %u   %u fps",
+		         g_frames + g_fps, g_fps);
+		gfx_text(x + 20, y + 170,
+		         (g_fps >= 20u) ? COL_OK : COL_WARN, dbg, 2);
 	}
 
 	x = MARGIN + 640;
@@ -1379,11 +1419,14 @@ int main(int argc, char **argv)
 
 	input_init();
 	build_devices();
+	g_fps_mark = input_millis();
 	refresh_registry();
 	refresh_disc();
 
 	while (g_running)
 	{
+		int i;
+
 		input_poll();
 
 		if (g_dlg != DLG_NONE)
@@ -1398,6 +1441,19 @@ int main(int argc, char **argv)
 			case SCR_REGISTRY: handle_registry(); break;
 			default: break;
 			}
+		}
+
+		/* Age the cached free-space values so they refresh about twice a
+		 * second instead of once per frame. */
+		for (i = 0; i < (int)(sizeof(g_free_age) / sizeof(g_free_age[0])); i++)
+			g_free_age[i]++;
+
+		g_frames++;
+		if (input_millis() - g_fps_mark >= 1000u)
+		{
+			g_fps       = g_frames;
+			g_frames    = 0;
+			g_fps_mark  = input_millis();
 		}
 
 		draw();

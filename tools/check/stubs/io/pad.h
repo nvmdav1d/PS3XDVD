@@ -46,6 +46,18 @@ typedef struct _pad_info
 	u8  status[MAX_PADS];
 } padInfo;
 
+/* New-format port info (3.41+). port_status bit 0 means "connected". */
+typedef struct _pad_info2
+{
+	u32 max;
+	u32 connected;
+	u32 info;
+	u32 port_status[MAX_PORT_NUM];
+	u32 port_setting[MAX_PORT_NUM];
+	u32 device_capability[MAX_PORT_NUM];
+	u32 device_type[MAX_PORT_NUM];
+} padInfo2;
+
 typedef struct _pad_data
 {
 	s32 len;

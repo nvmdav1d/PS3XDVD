@@ -22,6 +22,12 @@ uint32_t g_pad_last_len;      /* padData.len of the last non-empty report */
 uint32_t g_pad_last_word;     /* raw button word, offset 4 of the padData */
 int      g_pad_ports_seen;    /* bitmask of ports that reported data      */
 
+/* Ports that actually have something attached. Polling all seven every frame
+ * means seven syscalls per frame on real hardware, where the pad subsystem has
+ * real work to do; that is 60 x 7 calls a second through a serviced queue. */
+static uint32_t g_active_ports;
+static uint32_t g_poll_count;
+
 int input_init(void)
 {
 	memset(&g_cur, 0, sizeof(g_cur));
@@ -32,19 +38,41 @@ int input_init(void)
 	g_pad_last_len    = 0;
 	g_pad_last_word   = 0;
 	g_pad_ports_seen  = 0;
+	g_active_ports    = 0;
 
 	g_ready = (g_ioPadInitRet == PAD_OK) ? 1 : 0;
 
+	if (!g_ready)
+		return 0;
+
 	/*
-	 * After ioPadInit the pad defaults to the 5 bit button format; the 7 bit
-	 * format the BTN_* bitfields describe has to be selected explicitly or the
-	 * high bits never arrive. Harmless where the port is empty.
+	 * Find out which ports have a device so the poll loop below stays cheap.
+	 * padInfo2 is the new-format call; if it is unavailable fall back to
+	 * polling every port, which is what the old code did unconditionally.
 	 */
-	if (g_ready)
 	{
+		padInfo2 info2;
 		uint32_t port;
-		for (port = 0; port < MAX_PORT_NUM; port++)
-			ioPadSetPressMode(port, PAD_PRESS_MODE_ON);
+
+		memset(&info2, 0, sizeof(info2));
+		if (ioPadGetInfo2(&info2) == PAD_OK)
+		{
+			for (port = 0; port < MAX_PORT_NUM; port++)
+			{
+				if (info2.port_status[port] & 0x1u)
+				{
+					g_active_ports |= 1u << port;
+					ioPadSetPressMode(port, PAD_PRESS_MODE_ON);
+				}
+			}
+		}
+
+		if (g_active_ports == 0)
+		{
+			g_active_ports = (1u << MAX_PORT_NUM) - 1u;
+			for (port = 0; port < MAX_PORT_NUM; port++)
+				ioPadSetPressMode(port, PAD_PRESS_MODE_ON);
+		}
 	}
 
 	gettimeofday(&g_t0, NULL);
@@ -114,14 +142,13 @@ void input_poll(void)
 	if (!g_ready)
 		return;
 
-	/*
-	 * Poll every port rather than port 0 only: RPCS3 and several CFW payloads
-	 * report a single controller on whichever port the OS handed it, and a
-	 * keyboard-to-pad bridge is not guaranteed to land on port 0.
-	 */
+	/* Only the ports that reported a device at startup. */
 	for (port = 0; port < MAX_PORT_NUM; port++)
 	{
 		padData data;
+
+		if (!(g_active_ports & (1u << port)))
+			continue;
 
 		memset(&data, 0, sizeof(data));
 		ioPadGetData(port, &data);
@@ -138,9 +165,14 @@ void input_poll(void)
 
 	g_pad_ports_seen = seen;
 
-	memset(&info, 0, sizeof(info));
-	if (ioPadGetInfo(&info) == 0)
-		g_pads_connected = (int)info.connected;
+	/* ioPadGetInfo is comparatively expensive and only feeds the on-screen
+	 * readout, so it runs occasionally rather than every frame. */
+	if ((g_poll_count++ % 120u) == 0u)
+	{
+		memset(&info, 0, sizeof(info));
+		if (ioPadGetInfo(&info) == 0)
+			g_pads_connected = (int)info.connected;
+	}
 
 	g_prev = g_cur;
 	g_cur  = mask;
