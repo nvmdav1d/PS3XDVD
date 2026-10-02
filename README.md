@@ -117,6 +117,40 @@ loudly with a specific message if the image turns out not to have SDL 1.3.
 `make pkg` is marked `continue-on-error` deliberately: the `.self` is the
 artifact that matters most and it must not be lost to a packaging hiccup.
 
+### Build gotchas, all four hit during the first real build
+
+These are not obvious from the PSL1GHT sources and each one produces a
+misleading error message. They are commented at the relevant lines in the
+`Makefile`.
+
+1. **`OFILES` must be set before `include $(PSL1GHT)/ppu_rules`.**
+   `base_rules` declares the link rule as `%.elf: $(OFILES)`. Make expands a
+   rule's prerequisite list when it *reads the rule*, not when it runs the
+   recipe, so an `OFILES` assigned after the include leaves the rule with no
+   prerequisites at all. Make then compiles nothing and links nothing:
+   `undefined reference to 'main'`.
+
+2. **`LD` must be assigned explicitly.** `base_rules` uses
+   `export CC := $(PREFIX)gcc` for the compiler but `export LD ?= $(PREFIX)gcc`
+   for the linker. GNU make already has a built-in `LD`, `?=` never overrides an
+   existing value, so `LD` stays the host `ld` — which rejects *every*
+   PowerPC archive with a wall of `skipping incompatible ... libm.a`. The
+   misleading part is that the same message appears for newlib's own `libm.a`.
+   PSL1GHT's own samples work around this with `export LD := $(CC)`.
+
+3. **`LIBPATHS` is never assigned by PSL1GHT.** The link recipe is
+   `$(LD) $^ $(LDFLAGS) $(LIBPATHS) $(LIBS)`, so without it every PSL1GHT
+   library reports as missing.
+
+4. **There is no `libfs` and no `libpad` in the image.** The `sysFs*`
+   filesystem API is in `libsysfs.a`; the `ioPad*` entry points are in
+   `libio.a`, which is what PSL1GHT's `samples/input/padtest` links. Both were
+   confirmed by grepping every shipped archive for the symbol names rather than
+   trusting library names.
+
+Also note SDL installs as `portlibs/ppu/include/SDL/SDL.h`, so
+`-I$(PORTLIBS)/include/SDL` is needed for `#include <SDL.h>`.
+
 ## Using it
 
 | Button | Action |
