@@ -81,6 +81,13 @@ jobs:
           echo "base_rules : $(ls "$PSL1GHT"/base_rules 2>/dev/null || echo MISSING)"
           echo "libSDL.a   : $(ls "$PS3DEV"/portlibs/ppu/lib/libSDL.a 2>/dev/null || echo MISSING)"
           echo "SDL.h      : $(ls "$PS3DEV"/portlibs/ppu/include/SDL/SDL.h 2>/dev/null || echo MISSING)"
+          echo
+          echo "### inputs 'make pkg' needs"
+          echo "  ICON0.PNG         : $(ls "$PS3DEV"/bin/ICON0.PNG 2>/dev/null || echo MISSING)"
+          echo "  sfo.xml           : $(ls "$PS3DEV"/bin/sfo.xml 2>/dev/null || echo MISSING)"
+          for t in make_self_npdrm sfo pkg package_finalize; do
+            echo "  $t$(printf '%*s' $((18 - ${#t})) ''): $(ls "$PS3DEV"/bin/$t 2>/dev/null || echo MISSING)"
+          done
 
       # Purely diagnostic: answers why the link line behaves the way it does.
       - name: Diagnose the link toolchain
