@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <lv2/sysfs.h>
+#include <sys/file.h>
 
 #include "disc.h"
 #include "gfx.h"
@@ -66,6 +67,11 @@ static int         g_region_sel;
 static xreg_state  g_reg;
 static int         g_reg_loaded;       /* at least the DVD region key was found */
 static int         g_reg_readable;     /* xRegistry.sys itself could be read    */
+
+/* The registry screen draws the "last applied" record before the helpers that
+ * read it are defined. A missing record is not an error, so it just returns
+ * non zero. */
+static int         read_last_applied(xreg_state *out);
 
 static disc_info   g_disc;
 static int         g_disc_sel;
@@ -763,6 +769,41 @@ static void draw_registry(void)
 	         fs_exists(BACKUP_FILE) ? COL_OK : COL_DIM,
 	         fs_exists(BACKUP_FILE) ? "present" : "not created yet", 2);
 
+	/* Whether the last requested change is still the one in flash. This is
+	 * the difference between "the disc does not match" and "the console
+	 * threw the change away". */
+	{
+		xreg_state saved;
+		char msg[700];
+
+		if (read_last_applied(&saved) == 0)
+		{
+			int stuck = (g_reg_loaded &&
+			             saved.ps3_region == g_reg.ps3_region &&
+			             saved.dvd_region == g_reg.dvd_region &&
+			             saved.bd_region  == g_reg.bd_region &&
+			             saved.tv_system  == g_reg.tv_system);
+
+			snprintf(b, sizeof(b), "%s", ps3_region_name(saved.ps3_region));
+			kv(x + 620, y + 62, 140, "Last applied", b,
+			   stuck ? COL_OK : COL_ERR);
+			snprintf(b, sizeof(b), "DVD %s  BD %s  %s",
+			         dvd_region_name(saved.dvd_region),
+			         bd_region_name(saved.bd_region),
+			         tv_system_name(saved.tv_system));
+			gfx_text(x + 620, y + 90, stuck ? COL_OK : COL_ERR, b, 2);
+			gfx_text(x + 620, y + 118, COL_DIM,
+			         stuck ? "still in flash after reboot"
+			                : "REVERTED by the console on boot",
+			         2);
+			(void)msg;
+		}
+		else
+		{
+			kv(x + 620, y + 62, 140, "Last applied", "no record yet", COL_DIM);
+		}
+	}
+
 	y += 330;
 	draw_list(x, y, 1180, 3, g_registry_sel, 40);
 	gfx_text(x + 30, y + 0 * 40, COL_TEXT, "Create backup now", 2);
@@ -903,6 +944,98 @@ static void refresh_registry(void)
 	g_reg_readable = 1;
 	if (xreg_read_state(&g_reg) == 0)
 		g_reg_loaded = 1;
+}
+
+/* -------------------------------------------------- last applied bookkeeping --
+ *
+ * Reading flash back immediately after writing only proves the write worked.
+ * It says nothing about whether the console still holds those values after a
+ * reboot, which is the thing that actually matters when a DVD is rejected with
+ * "region code is not correct". So the requested values are recorded on the
+ * HDD and compared against flash on the next launch. A mismatch means the
+ * console reverted the change, which is a completely different problem from
+ * the disc not matching the region.
+ */
+
+#define LAST_APPLIED_FILE APP_BACKUP_DIR "/last_applied.txt"
+
+static void write_last_applied(const xreg_state *st)
+{
+	char buf[128];
+	int  fd = -1;
+	int  n;
+
+	n = snprintf(buf, sizeof(buf),
+	             "ps3=%u\ndvd=%u\nbd=%u\ntv=%u\n",
+	             st->ps3_region, st->dvd_region, st->bd_region, st->tv_system);
+	if (n <= 0)
+		return;
+
+	fs_mkdir_p(APP_BACKUP_DIR, 0777);
+	fd = fs_create(LAST_APPLIED_FILE, 0777);
+	if (fd < 0)
+		return;
+	io_write_all(fd, buf, (size_t)n);
+	sysLv2FsFsync(fd);
+	sysFsClose(fd);
+}
+
+static int read_last_applied(xreg_state *out)
+{
+	char buf[128];
+	s32  fd = -1;
+	uint64_t got = 0;
+	char *p;
+
+	memset(out, 0, sizeof(*out));
+	if (sysFsOpen(LAST_APPLIED_FILE, SYS_O_RDONLY, &fd, NULL, 0) != 0 || fd < 0)
+		return -1;
+	if (sysFsRead(fd, buf, sizeof(buf) - 1, &got) != 0 || got == 0)
+	{
+		sysFsClose(fd);
+		return -1;
+	}
+	sysFsClose(fd);
+	buf[got] = '\0';
+
+	if (sscanf(buf, "ps3=%udvd=%ubd=%utv=%u",
+	           &out->ps3_region, &out->dvd_region,
+	           &out->bd_region, &out->tv_system) != 4)
+		return -1;
+	(void)p;
+	return 0;
+}
+
+/* Returns 1 when flash disagrees with what was applied last time. */
+static int last_applied_disagrees(const xreg_state *want, char *msg, size_t msg_size)
+{
+	xreg_state saved;
+
+	if (!g_reg_loaded)
+		return 0;
+	if (read_last_applied(&saved) != 0)
+		return 0;
+	if (saved.ps3_region == want->ps3_region &&
+	    saved.dvd_region == want->dvd_region &&
+	    saved.bd_region  == want->bd_region  &&
+	    saved.tv_system  == want->tv_system)
+		return 0;
+
+	snprintf(msg, msg_size,
+	         "You asked for %s (DVD %s / BD %s / %s).\n\n"
+	         "Flash now reports %s (DVD %s / BD %s / %s).\n\n"
+	         "The console reverted the change on boot, so it cannot be "
+	         "honoured. A DVD will keep being rejected no matter what this "
+	         "app writes. The HDD backup is still the original image.",
+	         ps3_region_name(want->ps3_region),
+	         dvd_region_name(want->dvd_region),
+	         bd_region_name(want->bd_region),
+	         tv_system_name(want->tv_system),
+	         ps3_region_name(g_reg.ps3_region),
+	         dvd_region_name(g_reg.dvd_region),
+	         bd_region_name(g_reg.bd_region),
+	         tv_system_name(g_reg.tv_system));
+	return 1;
 }
 
 /* Disc measurement that stays entirely inside the filesystem.
@@ -1110,9 +1243,15 @@ static void apply_region(void)
 	}
 
 	refresh_registry();
+
+	/* Record what was asked for, so the next launch can tell "the console
+	 * reverted it" apart from "the disc does not match this region". */
+	write_last_applied(&g_reg);
+
 	show_dialog(DLG_INFO, "Region applied",
-	            "%d setting(s) written to flash and verified.\n\nRestart the console for the "
-	            "change to take effect.", written);
+	            "%d setting(s) written to flash and verified.\n\n"
+	            "Fully power the console off (not standby), then turn it "
+	            "back on for the change to take effect.", written);
 }
 
 /* Ask first, then measure the disc and dump it. This is the only place in the
@@ -1508,6 +1647,15 @@ int main(int argc, char **argv)
 	g_fps_mark = input_millis();
 	refresh_registry();
 	refresh_disc();
+
+	/* If the console rolled the region change back on boot, say so straight
+	 * away: it explains a rejected DVD that no amount of rewriting will
+	 * fix, and it is invisible otherwise. */
+	{
+		char why[700];
+		if (last_applied_disagrees(&g_reg, why, sizeof(why)))
+			show_dialog(DLG_WARN, "Region change was reverted", "%s", why);
+	}
 
 	/* Paint once up front: the loop below only redraws on an input edge, so
 	 * without this the window would stay black until the first keypress. */
