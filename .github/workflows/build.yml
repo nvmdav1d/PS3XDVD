@@ -127,7 +127,7 @@ jobs:
           echo "### which archive mentions sysFsOpen / ioPadInit?"
           # grep on the archive is enough: the symbol appears in the member
           # symbol tables, whether it is defined or merely referenced.
-          for sym in sysFsOpen sysFsReaddir ioPadInit ioPadGetData; do
+          for sym in sysFsOpen sysLv2FsFsync ioPadInit SDL_SetVideoMode; do
             echo "  -- $sym"
             for a in $(find "$PS3DEV" -name '*.a' 2>/dev/null); do
               if grep -qa -- "$sym" "$a" 2>/dev/null; then

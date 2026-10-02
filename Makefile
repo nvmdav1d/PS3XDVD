@@ -73,13 +73,15 @@ LDFLAGS   += $(LIBPATHS)
 # SDL 1.3 is a static library that pulls in the whole RSX/video/audio stack, so
 # its undefined symbols have to be resolved after it.
 #
-# -lfs is what provides sysFsOpen/Read/Write/Stat/Mkdir/Chmod/Opendir/Readdir
-# and sysLv2FsFsync; without it the link fails on every filesystem call.
+# -lsysfs is what provides sysFsOpen/Read/Write/Stat/Mkdir/Chmod/Opendir/
+# Readdir/GetFreeSize/Lseek and sysLv2FsFsync. Verified against the image with
+# "grep -a sysFsOpen" over every archive: the symbol lives only in libsysfs.a.
+# There is no libfs.a - asking for -lfs fails with "cannot find -lfs".
 #
 # There is deliberately no -lpad: the ioPad* entry points live in libio, which is
 # what PSL1GHT's own samples/input/padtest links (-lio -lnet). The hldtux/ps3dev
-# image ships no libpad.a at all, so asking for one breaks the link.
-LIBS      := -lSDL -lfs -lsysutil -lrsx -lgcm_sys -lio -laudio \
+# image ships no libpad.a at all.
+LIBS      := -lSDL -lsysfs -lsysutil -lrsx -lgcm_sys -lio -laudio \
              -lrt -llv2 -lm
 
 all:      $(TARGET).self
