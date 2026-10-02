@@ -18,6 +18,14 @@ CONTENTID := UP0001-$(APPID)_00-0000000000000000
 
 include $(PSL1GHT)/ppu_rules
 
+# base_rules declares the tools as "export CC := $(PREFIX)gcc" but the linker as
+# "export LD ?= $(PREFIX)gcc". GNU make already has a built-in LD, and ?= leaves
+# an existing value alone, so LD stays the host "ld" - which then rejects every
+# PowerPC archive as "skipping incompatible". Assigning explicitly is the fix.
+CC      := ppu-gcc
+LD      := ppu-gcc
+CXX     := ppu-g++
+
 TARGET    := DVDREGION
 SOURCES   := source/main.c \
              source/util.c \
