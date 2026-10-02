@@ -55,7 +55,8 @@ typedef enum
 {
 	DLGACT_NONE = 0,
 	DLGACT_RESTORE,
-	DLGACT_QUIT
+	DLGACT_QUIT,
+	DLGACT_RESTART
 } dialog_action;
 
 static screen_id   g_screen = SCR_HOME;
@@ -1180,14 +1181,11 @@ static void handle_registry(void)
 		else if (g_registry_sel == 1)
 			ask_restore();
 		else
-		{
-			/* Honours the request only on a modified hypervisor; if the
-			 * console is still alive afterwards it was refused. */
-			input_restart_console();
-			show_dialog(DLG_INFO, "Restart requested",
-			            "If this app is still running, your firmware refused the\n"
-			            "request: power the console off and on again instead.");
-		}
+			show_dialog(DLG_YESNO, "Restart the console?",
+			            "The console will restart now.\n\n"
+			            "If this app is still running afterwards, your firmware "
+			            "refused the request and you will need to power-cycle by hand.");
+			g_dlg_act = DLGACT_RESTART;
 	}
 }
 
@@ -1207,8 +1205,8 @@ static void handle_home(void)
 		case 2: g_screen = SCR_REGISTRY; g_registry_sel = 0; break;
 		case 3: g_screen = SCR_HELP;     break;
 		default:
-			/* Confirmation, because an accidental exit on a five item list
-			 * used to look like a crash. */
+			/* Guarded: an accidental exit on a five item list used to look
+			 * like a crash, and the old exit path could hard-lock the console. */
 			show_dialog(DLG_YESNO, "Quit to the XMB?",
 			            "Close DVD Region Tools and return to the console menu.");
 			g_dlg_act = DLGACT_QUIT;
@@ -1299,6 +1297,15 @@ static void handle_dialog(void)
 
 			if (act == DLGACT_RESTORE)
 				do_restore();
+			else if (act == DLGACT_RESTART)
+			{
+				/* Honours the request only on a modified hypervisor; if the
+				 * console is still alive afterwards it was refused. */
+				input_restart_console();
+				show_dialog(DLG_INFO, "Restart requested",
+				            "If this app is still running, your firmware refused "
+				            "the\nrequest: power the console off and on again instead.");
+			}
 			else if (act == DLGACT_QUIT)
 				g_running = 0;
 			return;
