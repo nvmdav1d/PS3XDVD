@@ -16,11 +16,14 @@ typedef struct
 	int      present;          /* a VIDEO_TS directory exists              */
 	int      ifo_ok;           /* VIDEO_TS.IFO was found and is sane       */
 	char     provider[33];     /* 32 ASCII bytes from the VMG provider id  */
-	uint8_t  region_mask;      /* prohibited-region mask at IFO + 0x22     */
+	uint8_t  region_mask;      /* prohibited-region mask at VMG + 0x22     */
 	uint8_t  region_mask2;     /* the following byte, reported for info    */
+	int      have_vts;         /* a VTS IFO was read as a cross check      */
+	uint8_t  vts_mask;         /* prohibited-region mask at VTS + 0x22     */
+	int      region_conflict;  /* the two IFOs disagree, mask is untrusted */
 	uint32_t allowed_regions;  /* bit r (1..8) set => that region plays    */
-	char     region_list[40];  /* "R2" / "R2,R3" / "ALL" / "RCE?"          */
-	int      region_free;      /* mask == 0                                */
+	char     region_list[40];  /* "R2" / "R2,R3" / "ALL" / "RCE?" / "?"    */
+	int      region_free;      /* both IFOs agree the mask is zero         */
 	int      rce_suspected;    /* mask == 0xFF, RCE or unreadable          */
 	uint32_t vmg_last_sector;
 	uint32_t ifo_last_sector;

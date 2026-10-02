@@ -32,7 +32,8 @@ int rip_region_free_ifo(const char *ifo_path)
 		return -1;
 
 	if (io_read_all(fd, hdr, sizeof(hdr)) != 0 ||
-	    memcmp(hdr, "DVDVIDEO-VMG", 12) != 0)
+	    (memcmp(hdr, "DVDVIDEO-VMG", 12) != 0 &&
+	     memcmp(hdr, "DVDVIDEO-VTS", 12) != 0))
 	{
 		sysFsClose(fd);
 		return -2;
@@ -53,6 +54,45 @@ int rip_region_free_ifo(const char *ifo_path)
 	sysLv2FsFsync(fd);
 	sysFsClose(fd);
 	return 0;
+}
+
+/* Clearing only VIDEO_TS.IFO leaves every title set still region locked, which
+ * is why patched copies so often still refuse to play. Walk the copied files
+ * and clear the category byte in the VTS IFOs as well. */
+static int rip_patch_title_sets(const char *out_dir)
+{
+	char path[700];
+	char name[32];
+	int  i;
+	int  patched = 0;
+
+	for (i = 1; i <= 99; i++)
+	{
+		int rc;
+
+		snprintf(name, sizeof(name), "VTS_%02u_0.IFO", (unsigned)i);
+		ustrlcpy(path, out_dir, sizeof(path));
+		ustrlcat(path, "/", sizeof(path));
+		ustrlcat(path, name, sizeof(path));
+
+		if (!fs_exists(path))
+		{
+			snprintf(name, sizeof(name), "VTS_%02u_0.IFO;1", (unsigned)i);
+			ustrlcpy(path, out_dir, sizeof(path));
+			ustrlcat(path, "/", sizeof(path));
+			ustrlcat(path, name, sizeof(path));
+			if (!fs_exists(path))
+				break;                 /* title sets are contiguous */
+		}
+
+		rc = rip_region_free_ifo(path);
+		if (rc == 0)
+			patched++;
+		else if (rc == -1)
+			break;                     /* not present after all */
+	}
+
+	return patched;
 }
 
 /* --------------------------------------------------------- split writers --- */
@@ -502,10 +542,23 @@ int rip_copy_video_ts(const char *out_dir, int patch_region,
 	if (patch_region)
 	{
 		char ifo[700];
+		int  vts = 0;
+
 		ustrlcpy(ifo, out_dir, sizeof(ifo));
 		ustrlcat(ifo, "/VIDEO_TS.IFO", sizeof(ifo));
 		if (rip_region_free_ifo(ifo) == 0)
 			st->patched = 1;
+
+		vts = rip_patch_title_sets(out_dir);
+		if (vts > 0)
+		{
+			snprintf(st->message, sizeof(st->message),
+			         "Done, %s%d title set mask%s cleared",
+			         st->patched ? "VMG + " : "", vts, (vts == 1) ? "" : "s");
+			st->finished = 1;
+			st->ok = 1;
+			return 0;
+		}
 	}
 
 	st->ok = 1;

@@ -439,10 +439,22 @@ static void draw_home(void)
 		             g_disc.rce_suspected ? COL_WARN : COL_TEXT,
 		             buf, 2, ALIGN_LEFT);
 		y += 26;
-		snprintf(buf, sizeof(buf), "Mask     : 0x%02X 0x%02X",
+		snprintf(buf, sizeof(buf), "Mask VMG : 0x%02X 0x%02X",
 		         g_disc.region_mask, g_disc.region_mask2);
-		gfx_text_box(x + 20, y, 520, 20, COL_DIM, buf, 2, ALIGN_LEFT);
+		gfx_text_box(x + 20, y, 520, 20,
+		             g_disc.region_conflict ? COL_WARN : COL_DIM,
+		             buf, 2, ALIGN_LEFT);
 		y += 26;
+		if (g_disc.have_vts)
+		{
+			snprintf(buf, sizeof(buf), "Mask VTS : 0x%02X%s",
+			         g_disc.vts_mask,
+			         g_disc.region_conflict ? "  (disagrees)" : "  (agrees)");
+			gfx_text_box(x + 20, y, 520, 20,
+			             g_disc.region_conflict ? COL_WARN : COL_DIM,
+			             buf, 2, ALIGN_LEFT);
+			y += 26;
+		}
 		snprintf(buf, sizeof(buf), "Titles   : %u", g_disc.num_titles);
 		gfx_text_box(x + 20, y, 520, 20, COL_DIM, buf, 2, ALIGN_LEFT);
 	}
@@ -627,10 +639,22 @@ static void draw_disc(void)
 		gfx_text_box(x + 20, yy, 560, 20,
 		             g_disc.region_free ? COL_OK : COL_TEXT, buf, 2, ALIGN_LEFT);
 		yy += 26;
-		snprintf(buf, sizeof(buf), "Mask     : 0x%02X 0x%02X",
+		snprintf(buf, sizeof(buf), "Mask VMG : 0x%02X 0x%02X",
 		         g_disc.region_mask, g_disc.region_mask2);
-		gfx_text_box(x + 20, yy, 560, 20, COL_DIM, buf, 2, ALIGN_LEFT);
+		gfx_text_box(x + 20, yy, 560, 20,
+		             g_disc.region_conflict ? COL_WARN : COL_DIM,
+		             buf, 2, ALIGN_LEFT);
 		yy += 26;
+		if (g_disc.have_vts)
+		{
+			snprintf(buf, sizeof(buf), "Mask VTS : 0x%02X%s",
+			         g_disc.vts_mask,
+			         g_disc.region_conflict ? "  (disagrees)" : "  (agrees)");
+			gfx_text_box(x + 20, yy, 560, 20,
+			             g_disc.region_conflict ? COL_WARN : COL_DIM,
+			             buf, 2, ALIGN_LEFT);
+			yy += 26;
+		}
 		snprintf(buf, sizeof(buf), "Titles   : %u", g_disc.num_titles);
 		gfx_text_box(x + 20, yy, 560, 20, COL_DIM, buf, 2, ALIGN_LEFT);
 		yy += 26;
@@ -1012,8 +1036,22 @@ static void apply_region(void)
 
 	snprintf(path, sizeof(path), "%s", BACKUP_FILE);
 	fs_mkdir_p(APP_BACKUP_DIR, 0777);
+
+	/* Keep the very first backup, not the most recent one, so there is
+	 * always something to roll back to. A backup that silently failed must
+	 * stop the write: overwriting flash with no way back is the one mistake
+	 * this app could make that actually bricks a console. */
 	if (!fs_exists(path))
-		xreg_backup(path);
+	{
+		if (xreg_backup(path) != 0 || !fs_exists(path))
+		{
+			show_dialog(DLG_ERROR, "Backup failed",
+			            "The original registry could not be saved to\n%s\n\n"
+			            "Nothing was written to flash. Free up space on the "
+			            "HDD and try again.", path);
+			return;
+		}
+	}
 
 	written = xreg_apply(&g_reg);
 	if (written <= 0)
@@ -1028,15 +1066,52 @@ static void apply_region(void)
 	if (xreg_save() != 0)
 	{
 		show_dialog(DLG_ERROR, "Write failed",
-		            "Could not write %s.\n\nFlash is probably read only here.",
+		            "Could not write %s.\n\nFlash is probably read only here.\n\n"
+		            "Restore from the backup on the Region page if it looks wrong.",
 		            XREG_PATH);
 		refresh_registry();
 		return;
 	}
 
+	/* Read the bytes back off flash rather than trusting the write. */
+	{
+		xreg_state check;
+
+		memset(&check, 0, sizeof(check));
+		if (xreg_load() != 0 || xreg_read_state(&check) != 0)
+		{
+			show_dialog(DLG_WARN, "Could not verify",
+			            "The write reported success but the settings could not be "
+			            "read back.\n\nReboot and check before changing anything "
+			            "else. A backup is at\n%s", path);
+			refresh_registry();
+			return;
+		}
+
+		if (check.dvd_region != g_reg.dvd_region ||
+		    check.bd_region  != g_reg.bd_region  ||
+		    check.tv_system  != g_reg.tv_system  ||
+		    check.ps3_region != g_reg.ps3_region)
+		{
+			show_dialog(DLG_WARN, "Settings did not stick",
+			            "Flash now reports DVD %s / BD %s / %s instead of the "
+			            "requested %s / %s / %s.\n\nReboot and check. A backup "
+			            "is at\n%s",
+			            dvd_region_name(check.dvd_region),
+			            bd_region_name(check.bd_region),
+			            tv_system_name(check.tv_system),
+			            dvd_region_name(g_reg.dvd_region),
+			            bd_region_name(g_reg.bd_region),
+			            tv_system_name(g_reg.tv_system),
+			            path);
+			refresh_registry();
+			return;
+		}
+	}
+
 	refresh_registry();
 	show_dialog(DLG_INFO, "Region applied",
-	            "%d setting(s) written to flash.\n\nRestart the console for the "
+	            "%d setting(s) written to flash and verified.\n\nRestart the console for the "
 	            "change to take effect.", written);
 }
 

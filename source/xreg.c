@@ -256,7 +256,15 @@ static int find_value_walk(uint32_t key_off, xreg_entry *out)
 }
 
 /* Fallback: look for the keyref field anywhere in the value area and sanity
- * check the entry that follows it. */
+ * check the entry that follows it.
+ *
+ * The value area is mostly zero padding, so a bare 16-bit match on the keyref
+ * alone will happily land inside some other entry's data. A false positive here
+ * is not a cosmetic problem: xreg_find() hands the offset straight to
+ * write_u32(), which would then scribble over an unrelated setting. Every real
+ * entry starts with a zero flags word, so require that, require a plausible
+ * value id, and require the keyref to start on an even boundary relative to the
+ * value area. */
 static int find_value_scan(uint32_t key_off, xreg_entry *out)
 {
 	uint32_t want = key_off - KEYREF_BIAS;
@@ -267,10 +275,22 @@ static int find_value_scan(uint32_t key_off, xreg_entry *out)
 
 	for (i = VAL_AREA_START; i + 9 <= VAL_AREA_END; i += 2)
 	{
+		uint16_t flags;
 		uint16_t len;
+		uint16_t id;
 		uint8_t  typ;
 
 		if (be16(g_buf + i + 2) != want)
+			continue;
+
+		/* Real entries carry flags == 0. A match in the middle of some
+		 * other value's bytes will not satisfy this. */
+		flags = be16(g_buf + i);
+		if (flags != 0)
+			continue;
+
+		id = be16(g_buf + i + 4);
+		if (id > 0x0FFF)
 			continue;
 
 		len = be16(g_buf + i + 6);

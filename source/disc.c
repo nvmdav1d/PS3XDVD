@@ -53,6 +53,34 @@ int disc_read_ifo(void *buf, uint32_t len)
 	return read_video_ts_ifo(buf, len);
 }
 
+/* The VMG describes the volume, but a player resolves the region per title
+ * set, so the first VTS is the authority that actually decides playback. The
+ * two disagree often enough on real discs that reading only one of them is how
+ * you end up confidently reporting the wrong answer. */
+static int read_vts_ifo(void *buf, uint32_t len)
+{
+	static const char *bases[] = {
+		"/dev_bdvd/VIDEO_TS/VTS_01_0.IFO",
+		"/dev_bdvd/VIDEO_TS/VTS_01_0.IFO;1",
+		"/dev_bdvd/VIDEO_TS;/VTS_01_0.IFO",
+		"/dev_bdvd/VIDEO_TS;/VTS_01_0.IFO;1"
+	};
+	size_t i;
+
+	for (i = 0; i < sizeof(bases) / sizeof(bases[0]); i++)
+	{
+		int fd = -1;
+		int ret = sysFsOpen(bases[i], SYS_O_RDONLY, &fd, NULL, 0);
+		if (ret != 0 || fd < 0)
+			continue;
+		ret = io_read_all(fd, buf, len);
+		sysFsClose(fd);
+		if (ret == 0)
+			return 0;
+	}
+	return -1;
+}
+
 static int video_ts_present(void)
 {
 	return path_exists(BDVD_ROOT, "/VIDEO_TS") ||
@@ -89,7 +117,10 @@ void disc_region_string(uint8_t mask, uint32_t allowed, char *out, size_t out_si
 
 	if (mask == 0x00)
 	{
-		ustrlcpy(out, "ALL (region free)", out_size);
+		/* Deliberately not called "region free": a zero VMG category is what
+		 * RPC-2 and pressed discs report too, and calling it region free is
+		 * how this app used to lie to the user. */
+		ustrlcpy(out, "ALL (no restriction declared)", out_size);
 		return;
 	}
 	if (mask == 0xFF)
@@ -143,13 +174,15 @@ int disc_probe(disc_info *out)
 	out->ifo_err = 0;
 	out->ifo_ok  = 1;
 
-	/* VMGI_MAT layout, big endian:
-	 *   0x00 "DVDVIDEO-VMG"   0x04 vmg last sector      0x0C vmg ifo last sector
-	 *   0x20 version          0x22 category (4 bytes)  0x26 number of volumes
-	 *   0x28 volume number    0x2A side id             0x3E number of title sets
-	 *   0x40 provider id (32) 0x80 end of VMGI_MAT     0x84 first play PGC   */
-	out->vmg_last_sector = be32(ifo + 0x04);
-	out->ifo_last_sector = be32(ifo + 0x0C);
+	/* VMGI_MAT layout, big endian. The 12 byte identifier occupies 0x00..0x0B,
+	 * so the two sector counts start at 0x0C and 0x10:
+	 *   0x00 "DVDVIDEO-VMG" (12)  0x0C vmg last sector   0x10 vmg ifo last sector
+	 *   0x20 version             0x22 category (4 bytes) 0x26 number of volumes
+	 *   0x28 volume number       0x2A side id            0x3E number of title sets
+	 *   0x40 provider id (32)    0x80 end of VMGI_MAT    0x84 first play PGC
+	 */
+	out->vmg_last_sector = be32(ifo + 0x0C);
+	out->ifo_last_sector = be32(ifo + 0x10);
 	out->region_mask     = ifo[IFO_REGION_MASK_OFFSET];
 	out->region_mask2    = ifo[IFO_REGION_MASK_OFFSET + 1];
 	out->num_titles      = be16(ifo + 0x3E);
@@ -159,6 +192,25 @@ int disc_probe(disc_info *out)
 	copy_provider(out->provider, ifo + 0x40, 32);
 
 	out->allowed_regions = 0;
+
+	/* Cross check the volume IFO against the first title set. */
+	out->have_vts = 0;
+	out->vts_mask = 0;
+	out->region_conflict = 0;
+	{
+		uint8_t vts[256];
+
+		memset(vts, 0, sizeof(vts));
+		if (read_vts_ifo(vts, sizeof(vts)) == 0 &&
+		    memcmp(vts, "DVDVIDEO-VTS", 12) == 0)
+		{
+			out->have_vts  = 1;
+			out->vts_mask = vts[IFO_REGION_MASK_OFFSET];
+			if (out->vts_mask != out->region_mask)
+				out->region_conflict = 1;
+		}
+	}
+
 	if (out->region_mask != 0xFF)
 	{
 		int i;
@@ -166,11 +218,20 @@ int disc_probe(disc_info *out)
 			if (!(out->region_mask & (1u << i)))
 				out->allowed_regions |= (1u << i);
 	}
-	out->region_free = (out->region_mask == 0x00);
+
 	out->rce_suspected = (out->region_mask == 0xFF);
 
-	disc_region_string(out->region_mask, out->allowed_regions,
-	                   out->region_list, sizeof(out->region_list));
+	/* Only claim "region free" when the byte is zero and nothing contradicts
+	 * it. A single zero byte is not proof: pressed discs and RPC-2 titles
+	 * both report 0x00 here while still refusing to play, and the previous
+	 * build got this wrong in exactly that way. */
+	out->region_free = (out->region_mask == 0x00) && !out->region_conflict;
+
+	if (out->region_conflict)
+		ustrlcpy(out->region_list, "unreliable", sizeof(out->region_list));
+	else
+		disc_region_string(out->region_mask, out->allowed_regions,
+		                   out->region_list, sizeof(out->region_list));
 
 	return 0;
 }

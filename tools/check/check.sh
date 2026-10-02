@@ -24,3 +24,20 @@ for f in "$ROOT"/source/*.c "$HERE/host_stubs.c"; do
 done
 
 echo "HOST COMPILE CHECK PASSED"
+
+# Unit tests for the two pieces of logic that are worth more than a type check:
+# the xRegistry writer (the only code that can brick a console) and the
+# DVD-Video region detection (which used to report discs as region free).
+run_tests() {
+  name=$1
+  shift
+  printf '  %s\n' "linking $name"
+  $CC -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -std=c99 \
+      -I "$HERE/stubs" -I "$ROOT/include" \
+      -o "$OUT/$name" "$@" "$HERE/host_stubs.c"
+  "$OUT/$name"
+}
+
+run_tests test_xreg.exe "$ROOT/source/xreg.c" "$ROOT/source/util.c" "$HERE/test_xreg.c"
+run_tests test_disc.exe "$ROOT/source/disc.c" "$ROOT/source/util.c" \
+                      "$ROOT/source/storage.c" "$HERE/test_disc.c"
