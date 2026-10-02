@@ -84,6 +84,11 @@ static char        g_basename[160];
 static char        g_dev[9][24];
 static int         g_dev_count;
 
+/* Cached free space per device; refreshed about twice a second rather than
+ * once per frame, because sysFsGetFreeSize is real filesystem work. */
+static uint64_t    g_free_val[9];
+static uint32_t    g_free_age[9];
+
 static int         g_registry_sel;
 static dialog_kind  g_dlg;
 static dialog_action g_dlg_act;
@@ -110,6 +115,8 @@ static void build_devices(void)
 {
 	int i;
 
+	memset(g_free_age, 0xFF, sizeof(g_free_age));   /* force a real query first time */
+
 	g_dev_count = 0;
 	ustrlcpy(g_dev[g_dev_count++], "/dev_hdd0", sizeof(g_dev[0]));
 
@@ -126,12 +133,9 @@ static void build_devices(void)
  * Free space comes from sysFsGetFreeSize, which is real filesystem work and
  * not free on a spinning disk. It used to be called once per frame from the
  * draw path, i.e. 60 queries a second just to paint a label, which showed up
- * as lag before anything else went wrong. Cache it per device and refresh
- * roughly twice a second.
+ * as lag before anything else went wrong. Cached per device and refreshed
+ * roughly twice a second; see g_free_val above.
  */
-static uint64_t g_free_val[9];
-static uint32_t g_free_age[9];
-
 static int device_index(const char *dev)
 {
 	int i;
@@ -1423,9 +1427,17 @@ int main(int argc, char **argv)
 	refresh_registry();
 	refresh_disc();
 
+	/* Paint once up front: the loop below only redraws on an input edge, so
+	 * without this the window would stay black until the first keypress. */
+	draw();
+
 	while (g_running)
 	{
-		int i;
+		int      i;
+		int      last_serial;
+		uint32_t fps_changed;
+
+		last_serial = input_change_serial();
 
 		input_poll();
 
@@ -1449,14 +1461,26 @@ int main(int argc, char **argv)
 			g_free_age[i]++;
 
 		g_frames++;
+		fps_changed = 0;
 		if (input_millis() - g_fps_mark >= 1000u)
 		{
 			g_fps       = g_frames;
 			g_frames    = 0;
 			g_fps_mark  = input_millis();
+			fps_changed = 1;   /* the readout changed, so repaint it */
 		}
 
-		draw();
+		/*
+		 * Only redraw when something actually changed. An unconditional
+		 * full-screen clear plus SDL_Flip at 60 Hz submits RSX work faster
+		 * than the RSX drains it; on real hardware that backed the command
+		 * queue up until the console wedged, with the app still holding the
+		 * RSX so the XMB could not paint either. Idle frames now cost one
+		 * 16 ms sleep and nothing else.
+		 */
+		if (input_change_serial() != last_serial || fps_changed)
+			draw();
+
 		usleep(16666);
 	}
 

@@ -27,6 +27,8 @@ int      g_pad_ports_seen;    /* bitmask of ports that reported data      */
  * real work to do; that is 60 x 7 calls a second through a serviced queue. */
 static uint32_t g_active_ports;
 static uint32_t g_poll_count;
+static int      g_last_changed;
+static int      g_change_serial;
 
 int input_init(void)
 {
@@ -138,6 +140,7 @@ void input_poll(void)
 	uint32_t mask = 0;
 	int      seen = 0;
 	padInfo  info;
+	int      changed;
 
 	if (!g_ready)
 		return;
@@ -176,6 +179,20 @@ void input_poll(void)
 
 	g_prev = g_cur;
 	g_cur  = mask;
+
+	/* Edge-detected across polls, so one keypress reports one change even
+	 * though it stays "held" for many frames. */
+	changed = ((g_cur ^ g_prev) != 0);
+	if (changed != g_last_changed)
+	{
+		g_last_changed = changed;
+		g_change_serial++;
+	}
+}
+
+int input_change_serial(void)
+{
+	return g_change_serial;
 }
 
 int input_pressed(uint32_t mask)

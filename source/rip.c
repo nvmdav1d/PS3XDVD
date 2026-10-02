@@ -13,7 +13,7 @@
 #include "util.h"
 
 #define RAW_CHUNK_SECTORS 32                      /* 64 KB */
-#define COPY_CHUNK        (256 * 1024)
+#define COPY_CHUNK        (64 * 1024)
 #define READ_RETRIES      6
 
 static uint8_t g_raw[RAW_CHUNK_SECTORS * 2048];

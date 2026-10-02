@@ -30,6 +30,11 @@ int  input_held(uint32_t mask);
 /* The raw button mask from the most recent poll. */
 uint32_t input_mask(void);
 
+/* Increments once per *edge* of the button mask, i.e. once per keypress rather
+ * than once per frame held. main() uses this to decide whether a redraw is
+ * needed at all, so an idle app issues no RSX work. */
+int  input_change_serial(void);
+
 /* Auto-repeat helper for list navigation.
  * Fires immediately on press, then after `delay_ms`, then every `rate_ms`.
  * `state` must be a zero-initialised unsigned long owned by the caller.
