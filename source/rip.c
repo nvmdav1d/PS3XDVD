@@ -14,6 +14,14 @@
 
 #define RAW_CHUNK_SECTORS 32                      /* 64 KB */
 #define COPY_CHUNK        (64 * 1024)
+
+/* The bdvd bridge will not accept an arbitrarily large read: a 64 KB request
+ * for VIDEO_TS.BUP comes back empty on real hardware even though the member
+ * stats as 24576 bytes and opens cleanly. Reads therefore start at one sector
+ * and only grow while they keep returning whole, which keeps a 6 GB copy fast
+ * without ever issuing a request the bridge refuses. */
+#define BDVD_READ_MIN     2048u
+#define BDVD_SLEEP_EVERY  (512 * 1024)
 #define READ_RETRIES      6
 
 static uint8_t g_raw[RAW_CHUNK_SECTORS * 2048];
@@ -266,7 +274,17 @@ int rip_raw_iso(const char *out_path, uint64_t sectors, int patch_region,
 
 		if (handle == 0 || got != want)
 		{
-			ustrlcpy(st->message, "Read error, disc may be damaged",
+			/* This used to say "disc may be damaged", which sends people off
+			 * to clean a disc that is fine. A 1:1 dump needs the physical
+			 * drive, and on a console that refuses or drops raw access this
+			 * is where it shows up, long after the folder copy would have
+			 * worked. */
+			ustrlcpy(st->message,
+			         "Raw drive read failed. This is the 1:1 ISO mode, which "
+			         "needs direct access to the Blu-ray drive.\n\n"
+			         "Your console most likely will not give it. Switch Dump "
+			         "mode to VIDEO_TS folder, which only reads files and "
+			         "does not need it.",
 			         sizeof(st->message));
 			st->failed = 1;
 			ret = -1;
@@ -409,7 +427,30 @@ static int open_video_ts_member(const char *nm, s32 *fd)
 	return -1;
 }
 
-/* Same idea for the size. Returns 0 and the size when one spelling works. */
+/* Opens the other spelling of a member name, for the case where the listing
+ * gives one form, open accepts it, but the read comes back empty. */
+static int open_video_ts_member_alt(const char *nm, s32 *fd)
+{
+	char path[600];
+	size_t len = strlen(nm);
+	int  ret;
+
+	if (len > 2 && strcmp(nm + len - 2, ";1") == 0)
+	{
+		ustrlcpy(path, "/dev_bdvd/VIDEO_TS/", sizeof(path));
+		ustrlcat(path, nm, sizeof(path));
+		path[len - 2] = '\0';
+	}
+	else
+	{
+		ustrlcpy(path, "/dev_bdvd/VIDEO_TS/", sizeof(path));
+		ustrlcat(path, nm, sizeof(path));
+		ustrlcat(path, ";1", sizeof(path));
+	}
+
+	ret = sysFsOpen(path, SYS_O_RDONLY, fd, NULL, 0);
+	return (ret == 0 && *fd >= 0) ? 0 : -1;
+}
 static int stat_video_ts_member(const char *nm, uint64_t *size)
 {
 	char path[600];
@@ -577,6 +618,8 @@ uint64_t total = 0;
 
 		{
 			int dfd = fs_create(dst, 0777);
+			size_t chunk = BDVD_READ_MIN;    /* see the note above the loop */
+			size_t since_sleep = 0;
 
 			if (dfd < 0)
 			{
@@ -589,22 +632,83 @@ uint64_t total = 0;
 				return -1;
 			}
 
-			/* Read until EOF instead of trusting st_size. The bridge reports
-			 * sizes that do not survive being used as a byte count: the old
-			 * loop truncated or aborted on the first mismatch, and a short
-			 * final read was treated as a hard error. */
+			/* Read until EOF instead of trusting st_size.
+			 *
+			 * Observed on real hardware: VIDEO_TS.BUP lists fine, stats as
+			 * 24576 bytes and opens, but a single 64 KB read of it returns
+			 * nothing at all, so the old loop reported "copied 0 of 24576".
+			 * The bdvd bridge does not accept arbitrarily large reads, so
+			 * this starts at one sector and grows only while reads keep
+			 * coming back whole. Growing adaptively matters: sleeping per
+			 * 2 KB read would turn a 6 GB copy into an hours long job. */
 			for (;;)
 			{
 				uint64_t got = 0;
-				uint64_t room = (list[i].sized && list[i].size > done_in_file)
-				              ? (list[i].size - done_in_file) : COPY_CHUNK;
-				size_t  want = (room > COPY_CHUNK) ? COPY_CHUNK : (size_t)room;
+				size_t  want;
+
+				if (list[i].sized && list[i].size > done_in_file)
+				{
+					uint64_t left = list[i].size - done_in_file;
+					want = (left < (uint64_t)chunk) ? (size_t)left : chunk;
+				}
+				else
+				{
+					want = chunk;
+				}
 
 				if (want == 0)
 					break;
 
 				if (sysFsRead(sfd, g_copy, (u64)want, &got) != 0 || got == 0)
+				{
+					/* End of file, or this read size is too big for the
+					 * bridge. A member that had not delivered a single byte
+					 * yet is retried under the other name spelling before
+					 * being called a failure. */
+					if (got == 0 && done_in_file == 0)
+					{
+						uint64_t save_pos = 0;
+
+						if (sysFsLseek(sfd, 0, SEEK_CUR, &save_pos) == 0)
+						{
+							sysFsClose(sfd);
+							sfd = -1;
+							if (open_video_ts_member_alt(list[i].name, &sfd) == 0)
+							{
+								sysFsClose(dfd);
+								dfd = fs_create(dst, 0777);
+								if (dfd < 0)
+									break;
+								chunk = BDVD_READ_MIN;
+								since_sleep = 0;
+								continue;
+							}
+						}
+snprintf(st->message, sizeof(st->message),
+					         "Read %.80s: no data from the drive",
+					         list[i].clean);
+						st->failed = 1;
+						st->finished = 1;
+						free(list);
+						return -1;
+					}
 					break;                     /* end of file */
+				}
+
+				if (got < (uint64_t)want)
+				{
+					/* A short read is normal here, so keep the size that
+					 * worked instead of asking for more. */
+					chunk = (size_t)got;
+					if (chunk < BDVD_READ_MIN)
+						chunk = BDVD_READ_MIN;
+				}
+				else if (chunk < COPY_CHUNK)
+				{
+					chunk *= 2;
+					if (chunk > COPY_CHUNK)
+						chunk = COPY_CHUNK;
+				}
 
 				if (io_write_all(dfd, g_copy, (size_t)got) != 0)
 				{
@@ -614,13 +718,19 @@ uint64_t total = 0;
 
 				done_in_file += got;
 				done += got;
+				since_sleep += (size_t)got;
 
 				if (report(cb, ctx, st, done))
 				{
 					cancelled = 1;
 					break;
 				}
-				usleep(1000);
+
+				if (since_sleep >= BDVD_SLEEP_EVERY)
+				{
+					since_sleep = 0;
+					usleep(1000);
+				}
 			}
 
 			sysLv2FsFsync(dfd);
