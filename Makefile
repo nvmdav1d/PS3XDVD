@@ -52,7 +52,9 @@ CC        := ppu-gcc
 CXX       := ppu-g++
 LD        := ppu-gcc
 
-INCLUDES  := -Iinclude -I$(PORTLIBS)/include
+# SDL installs its headers as $PORTLIBS/include/SDL/SDL.h, so both the parent
+# and the SDL subdirectory have to be on the include path for <SDL.h> to resolve.
+INCLUDES  := -Iinclude -I$(PORTLIBS)/include -I$(PORTLIBS)/include/SDL
 
 CFLAGS    += -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare \
              $(INCLUDES) $(LIBPSL1GHT_INC)
