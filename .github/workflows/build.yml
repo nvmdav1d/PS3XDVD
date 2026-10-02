@@ -123,7 +123,7 @@ jobs:
           echo
           echo "### every library on the link line actually present?"
           miss=0
-          for l in SDL sysutil rsx gcm_sys io audio rt lv2 m; do
+          for l in SDL fs sysutil rsx gcm_sys io audio rt lv2 m; do
             f=$(find "$PS3DEV" -name "lib$l.a" 2>/dev/null | head -1)
             if [ -z "$f" ]; then echo "  MISSING  lib$l.a"; miss=1;
             else printf '  ok       %-16s %s\n' "lib$l.a" "$f"; fi
